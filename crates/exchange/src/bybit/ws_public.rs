@@ -112,6 +112,30 @@ pub fn missing_candle_count(prev_open_ms: i64, next_open_ms: i64, tf: Timeframe)
     delta / step - 1
 }
 
+/// What the feed should do with a newly-confirmed candle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapAction {
+    /// No gap: emit the candle.
+    Emit,
+    /// `missing` candles are absent; backfill before emitting.
+    BackfillThenEmit { missing: i64 },
+}
+
+/// Decide how to handle a candle given the last one seen for its stream.
+///
+/// `last_open` is `None` on the very first candle observed for a
+/// (symbol, timeframe) pair, which is not a gap — there is nothing to
+/// compare against yet.
+pub fn gap_action(last_open: Option<i64>, candle_open_ms: i64, tf: Timeframe) -> GapAction {
+    match last_open {
+        None => GapAction::Emit,
+        Some(prev) => match missing_candle_count(prev, candle_open_ms, tf) {
+            0 => GapAction::Emit,
+            missing => GapAction::BackfillThenEmit { missing },
+        },
+    }
+}
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -218,19 +242,37 @@ async fn run_session(
                 let Some(candles) = parse_kline_message(&text)? else { continue };
                 for (symbol, tf, candle) in candles {
                     let key = (symbol.clone(), tf);
-                    if let Some(prev) = last_open.get(&key).copied() {
-                        let missing = missing_candle_count(prev, candle.open_time_ms, tf);
-                        if missing > 0 {
-                            warn!(%symbol, missing, "kline gap detected; backfilling via REST");
-                            match rest.klines(&symbol, tf, GAP_REFETCH_LIMIT).await {
-                                Ok(backfill) => {
-                                    let _ = tx.send(MarketEvent::GapFilled {
-                                        symbol: symbol.clone(),
-                                        tf,
-                                        candles: backfill,
-                                    });
-                                }
-                                Err(e) => error!(%symbol, error = %e, "gap backfill failed"),
+                    let prev = last_open.get(&key).copied();
+                    if let GapAction::BackfillThenEmit { missing } = gap_action(prev, candle.open_time_ms, tf) {
+                        warn!(%symbol, missing, "kline gap detected; backfilling via REST");
+                        match rest.klines(&symbol, tf, GAP_REFETCH_LIMIT).await {
+                            Ok(backfill) => {
+                                let _ = tx.send(MarketEvent::GapFilled {
+                                    symbol: symbol.clone(),
+                                    tf,
+                                    candles: backfill,
+                                });
+                            }
+                            Err(e) => {
+                                // The backfill failed, so the hole is still
+                                // open. Do NOT advance last_open and do NOT
+                                // emit this candle: doing either would let
+                                // the gap slip past undetected (last_open
+                                // would jump past the hole, making it
+                                // permanently invisible to future gap
+                                // checks) and would feed indicators a
+                                // discontinuous series with nothing aware of
+                                // it. Instead, tear the session down so the
+                                // outer loop reconnects with backoff; on the
+                                // next candle last_open still holds the
+                                // pre-gap value, so the same gap is
+                                // re-detected and the backfill retried.
+                                // Emitting nothing lets the engine's
+                                // feed-staleness guard block new entries,
+                                // which is the safe failure mode — silence
+                                // beats a lying feed.
+                                error!(%symbol, error = %e, "gap backfill failed; reconnecting to retry");
+                                return Err(e);
                             }
                         }
                     }

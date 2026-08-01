@@ -84,3 +84,35 @@ fn duplicate_or_out_of_order_candles_report_no_gap() {
     assert_eq!(missing_candle_count(prev, prev, Timeframe::H1), 0);
     assert_eq!(missing_candle_count(prev, prev - 3_600_000, Timeframe::H1), 0);
 }
+
+use exchange::bybit::ws_public::{gap_action, GapAction};
+
+#[test]
+fn first_ever_candle_for_a_stream_is_just_emitted() {
+    let next = 1_700_000_000_000;
+    assert_eq!(gap_action(None, next, Timeframe::H1), GapAction::Emit);
+}
+
+#[test]
+fn consecutive_candle_is_emitted_with_no_backfill() {
+    let prev = 1_700_000_000_000;
+    let next = prev + Timeframe::H1.duration_ms();
+    assert_eq!(gap_action(Some(prev), next, Timeframe::H1), GapAction::Emit);
+}
+
+#[test]
+fn one_missing_candle_requires_backfill_before_emit() {
+    let prev = 1_700_000_000_000;
+    let next = prev + 2 * Timeframe::H1.duration_ms();
+    assert_eq!(
+        gap_action(Some(prev), next, Timeframe::H1),
+        GapAction::BackfillThenEmit { missing: 1 }
+    );
+}
+
+#[test]
+fn duplicate_or_out_of_order_candle_is_just_emitted() {
+    let prev = 1_700_000_000_000;
+    assert_eq!(gap_action(Some(prev), prev, Timeframe::H1), GapAction::Emit);
+    assert_eq!(gap_action(Some(prev), prev - 3_600_000, Timeframe::H1), GapAction::Emit);
+}
