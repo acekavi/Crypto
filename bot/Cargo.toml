@@ -25,7 +25,7 @@ thiserror.workspace = true
 tokio.workspace = true
 toml = "0.8"
 tracing.workspace = true
-tracing-subscriber = "0.3"
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 temp-env = "0.3"
