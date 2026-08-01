@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+
+# Secrets — API credentials come from the environment, never from files in the repo
+.env
+.env.*
+!.env.example
+
+# Local state
+*.db
+*.db-shm
+*.db-wal
+/data
+/logs
