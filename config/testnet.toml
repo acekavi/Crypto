@@ -1,0 +1,31 @@
+[risk]
+risk_pct = 0.01
+max_concurrent_positions = 4
+max_daily_entries = 5
+daily_drawdown_halt_pct = 0.05
+total_drawdown_halt_pct = 0.15
+liq_buffer_multiple = 3.0
+leverage = 5
+
+[strategy]
+ema_fast = 50
+ema_slow = 200
+ema_entry = 20
+rsi_period = 14
+rsi_long_trigger = 40
+rsi_short_trigger = 60
+atr_period = 14
+atr_band_min_pct = 0.003
+atr_band_max_pct = 0.05
+swing_lookback = 10
+atr_stop_multiple = 1.5
+reward_multiple = 2.0
+entry_expiry_candles = 3
+stop_limit_offset_atr = 0.3
+max_stop_escalations = 3
+stop_fill_timeout_secs = 30
+
+[universe]
+size = 20
+min_turnover_24h = 50000000
+min_listing_age_days = 30
