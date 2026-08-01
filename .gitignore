@@ -15,3 +15,6 @@
 
 # graphify knowledge base — regenerable, contains machine-specific absolute paths
 graphify-out/
+
+# subagent-driven-development scratch: ledgers, briefs, review packages
+.superpowers/
