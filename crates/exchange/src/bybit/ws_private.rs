@@ -1,4 +1,4 @@
-use botcore::{Balance, OpenOrder, Position, Symbol};
+use botcore::{Balance, ErrorClass, OpenOrder, Position, Symbol};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -80,13 +80,66 @@ pub fn parse_private_message(raw: &str) -> Result<Vec<AccountEvent>, ExchangeErr
     Ok(out)
 }
 
+/// True when the frame is a rejected auth response.
+///
+/// Checked structurally rather than by substring match on the raw text:
+/// a rejected auth is the one Fatal condition on this stream, and it must
+/// not be missed because of incidental whitespace in the wire format.
+pub fn is_auth_rejected(value: &Value) -> bool {
+    value.get("op").and_then(|v| v.as_str()) == Some("auth")
+        && value.get("success").and_then(|v| v.as_bool()) == Some(false)
+}
+
+#[cfg(test)]
+mod parsing_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_auth_is_detected() {
+        let value: Value = serde_json::from_str(r#"{"op":"auth","success":false}"#).unwrap();
+        assert!(is_auth_rejected(&value));
+    }
+
+    #[test]
+    fn successful_auth_is_not_rejected() {
+        let value: Value = serde_json::from_str(r#"{"op":"auth","success":true}"#).unwrap();
+        assert!(!is_auth_rejected(&value));
+    }
+
+    #[test]
+    fn subscribe_ack_is_not_a_rejected_auth() {
+        let value: Value = serde_json::from_str(r#"{"op":"subscribe","success":true}"#).unwrap();
+        assert!(!is_auth_rejected(&value));
+    }
+
+    #[test]
+    fn a_normal_topic_frame_is_not_a_rejected_auth() {
+        let value: Value = serde_json::from_str(
+            r#"{"topic":"wallet","data":[{"totalEquity":"1","totalAvailableBalance":"1"}]}"#,
+        )
+        .unwrap();
+        assert!(!is_auth_rejected(&value));
+    }
+
+    #[test]
+    fn rejected_auth_is_still_detected_with_incidental_whitespace() {
+        // The check must be structural, not a substring match on the raw
+        // text: a rejected auth serialized with spaces after colons (e.g. by
+        // a different JSON encoder) must still be caught, because it is the
+        // one Fatal condition on this stream.
+        let spaced = "{\n  \"op\": \"auth\",\n  \"success\": false\n}";
+        let value: Value = serde_json::from_str(spaced).unwrap();
+        assert!(is_auth_rejected(&value));
+    }
+}
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::sign::ClockOffset;
 use super::transport::backoff_delay;
@@ -120,6 +173,19 @@ impl BybitPrivateFeed {
                     Ok(()) => {
                         info!("private feed session ended; reconnecting");
                         attempt = 0;
+                    }
+                    Err(e) if e.class() == ErrorClass::Fatal => {
+                        // Fatal (e.g. a rejected auth from a revoked or
+                        // invalid API key) is unrecoverable without a
+                        // human: retrying forever would look, from the
+                        // outside, exactly like a flaky network. Ending the
+                        // task instead drops `tx`, so every
+                        // broadcast::Receiver a caller holds immediately
+                        // starts returning RecvError::Closed — an
+                        // unambiguous signal on the existing subscribe()
+                        // signature, with no new health channel required.
+                        error!(error = %e, "private feed session failed fatally; not retrying");
+                        break;
                     }
                     Err(e) => {
                         warn!(error = %e, attempt, "private feed session failed");
@@ -175,8 +241,20 @@ async fn run_private_session(
                 let msg = frame.map_err(|e| ExchangeError::WebSocket(e.to_string()))?;
                 let Message::Text(text) = msg else { continue };
 
-                // An auth failure arrives as a frame, not a transport error.
-                if text.contains(r#""op":"auth""#) && text.contains(r#""success":false"#) {
+                // An auth failure arrives as a frame, not a transport error,
+                // and it is the one Fatal condition on this stream — checked
+                // structurally via `is_auth_rejected` rather than by
+                // substring match, so incidental whitespace in the wire
+                // format can never let a rejection slip through as a
+                // harmless no-topic ack. This parses `text` a second time
+                // (parse_private_message parses it again below); kept as
+                // two calls rather than widening parse_private_message to
+                // take an already-parsed Value, since these frames are small
+                // and infrequent and the simpler signature keeps its
+                // existing tests untouched.
+                let value: Value = serde_json::from_str(&text)
+                    .map_err(|e| ExchangeError::Decode(format!("private frame: {e}")))?;
+                if is_auth_rejected(&value) {
                     return Err(ExchangeError::Api {
                         code: 10004,
                         msg: format!("private stream auth rejected: {text}"),
