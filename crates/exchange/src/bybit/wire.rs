@@ -165,6 +165,135 @@ impl TickerRow {
     }
 }
 
+use botcore::{Balance, OpenOrder, OrderState, Position, Side};
+
+#[derive(Debug, Deserialize)]
+pub struct OrderCreateResult {
+    #[serde(rename = "orderId")]
+    pub order_id: String,
+    #[serde(rename = "orderLinkId")]
+    pub order_link_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PositionRow {
+    pub symbol: String,
+    pub side: String,
+    pub size: String,
+    #[serde(rename = "avgPrice")]
+    pub avg_price: String,
+    #[serde(rename = "liqPrice")]
+    pub liq_price: String,
+    #[serde(rename = "unrealisedPnl")]
+    pub unrealised_pnl: String,
+}
+
+/// Parse a Decimal field, treating an empty string as absent.
+fn opt_decimal(s: &str) -> Result<Option<Decimal>, ExchangeError> {
+    if s.trim().is_empty() {
+        return Ok(None);
+    }
+    s.parse::<Decimal>()
+        .map(Some)
+        .map_err(|e| ExchangeError::Decode(format!("decimal field: {e}")))
+}
+
+fn req_decimal(s: &str, field: &str) -> Result<Decimal, ExchangeError> {
+    s.parse::<Decimal>()
+        .map_err(|e| ExchangeError::Decode(format!("{field}: {e}")))
+}
+
+fn parse_side(s: &str) -> Result<Side, ExchangeError> {
+    match s {
+        "Buy" => Ok(Side::Buy),
+        "Sell" => Ok(Side::Sell),
+        other => Err(ExchangeError::Decode(format!("unknown side {other}"))),
+    }
+}
+
+impl PositionRow {
+    /// Returns `None` for flat positions — Bybit reports closed positions with
+    /// size 0, and treating those as open would create phantom state.
+    pub fn into_position(self) -> Result<Option<Position>, ExchangeError> {
+        let size = req_decimal(&self.size, "position size")?;
+        if size.is_zero() {
+            return Ok(None);
+        }
+        Ok(Some(Position {
+            symbol: Symbol::new(self.symbol),
+            side: parse_side(&self.side)?,
+            size,
+            entry_price: req_decimal(&self.avg_price, "avgPrice")?,
+            liq_price: opt_decimal(&self.liq_price)?,
+            unrealized_pnl: req_decimal(&self.unrealised_pnl, "unrealisedPnl")?,
+        }))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenOrderRow {
+    pub symbol: String,
+    #[serde(rename = "orderId")]
+    pub order_id: String,
+    #[serde(rename = "orderLinkId")]
+    pub order_link_id: String,
+    pub side: String,
+    pub price: String,
+    pub qty: String,
+    #[serde(rename = "cumExecQty")]
+    pub cum_exec_qty: String,
+    #[serde(rename = "orderStatus")]
+    pub order_status: String,
+    #[serde(rename = "createdTime")]
+    pub created_time: String,
+}
+
+impl OpenOrderRow {
+    pub fn into_open_order(self) -> Result<OpenOrder, ExchangeError> {
+        let state = match self.order_status.as_str() {
+            "New" | "Untriggered" => OrderState::New,
+            "PartiallyFilled" => OrderState::PartiallyFilled,
+            "Filled" => OrderState::Filled,
+            "Cancelled" | "Deactivated" => OrderState::Cancelled,
+            "Rejected" => OrderState::Rejected,
+            other => {
+                return Err(ExchangeError::Decode(format!("unknown orderStatus {other}")))
+            }
+        };
+        Ok(OpenOrder {
+            symbol: Symbol::new(self.symbol),
+            order_id: self.order_id,
+            order_link_id: self.order_link_id,
+            side: parse_side(&self.side)?,
+            price: req_decimal(&self.price, "order price")?,
+            qty: req_decimal(&self.qty, "order qty")?,
+            cum_exec_qty: req_decimal(&self.cum_exec_qty, "cumExecQty")?,
+            state,
+            created_time_ms: self
+                .created_time
+                .parse::<i64>()
+                .map_err(|e| ExchangeError::Decode(format!("createdTime: {e}")))?,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletRow {
+    #[serde(rename = "totalEquity")]
+    pub total_equity: String,
+    #[serde(rename = "totalAvailableBalance")]
+    pub total_available_balance: String,
+}
+
+impl WalletRow {
+    pub fn into_balance(self) -> Result<Balance, ExchangeError> {
+        Ok(Balance {
+            equity: req_decimal(&self.total_equity, "totalEquity")?,
+            available: req_decimal(&self.total_available_balance, "totalAvailableBalance")?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

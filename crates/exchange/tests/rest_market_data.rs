@@ -2,6 +2,7 @@ use botcore::{Symbol, Timeframe};
 use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use exchange::bybit::transport::ExchangeError;
+use exchange::ExchangeClient;
 use rust_decimal_macros::dec;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
