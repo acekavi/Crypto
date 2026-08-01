@@ -7,7 +7,7 @@ use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use exchange::bybit::ws_public::BybitPublicFeed;
 use exchange::{ExchangeClient, MarketEvent, MarketFeed, Subscription};
-use persistence::{Journal, spawn_sync_task};
+use persistence::{Journal, JournalError, spawn_sync_task};
 use tracing::{error, info};
 
 #[tokio::main]
@@ -46,6 +46,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ranked.truncate(config.universe.size);
     info!(count = ranked.len(), top = ?ranked.first().map(|t| t.symbol.as_str()), "universe ranked");
 
+    if ranked.is_empty() {
+        error!(
+            min_turnover_24h = config.universe.min_turnover_24h,
+            "no symbol met the turnover floor; the probe would subscribe to nothing"
+        );
+        return Err("universe filter produced an empty symbol list".into());
+    }
+
+    // turso::Builder::new_local expects the parent directory to already
+    // exist; create it so a fresh checkout can run without a manual
+    // `mkdir -p data` first.
+    std::fs::create_dir_all("data")
+        .map_err(|e| format!("failed to create data directory \"data\": {e}"))?;
+
     // 3. Prove the journal works, falling back to local-only when Turso is
     //    not configured or unreachable — never a reason to refuse to start.
     let journal = match (
@@ -59,7 +73,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     j
                 }
                 Err(e) => {
-                    error!(error = %e, "Turso sync unavailable; falling back to local journal");
+                    // Deliberately not logging the error's Display: it comes
+                    // from the underlying HTTP client and commonly embeds the
+                    // connection target, which would leak TURSO_DATABASE_URL
+                    // (a credential-adjacent value) into logs on exactly the
+                    // misconfiguration path most likely to trigger it.
+                    let kind = match &e {
+                        JournalError::Db(_) => "Db",
+                        JournalError::Decode(_) => "Decode",
+                    };
+                    error!(
+                        kind,
+                        "Turso sync unavailable; falling back to local journal"
+                    );
                     Journal::open_local("data/bot.db").await?
                 }
             }
@@ -70,7 +96,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let journal = Arc::new(journal);
-    journal.record_equity(balance.equity, 0).await?;
+    journal
+        .record_equity(balance.equity, rest.clock().now_ms())
+        .await?;
     spawn_sync_task(Arc::clone(&journal), Duration::from_secs(30));
 
     // 4. Prove the streaming feed works end to end.
@@ -98,7 +126,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = tokio::signal::ctrl_c() => {
                 info!("shutdown signal received");
                 if let Err(e) = journal.push().await {
-                    error!(error = %e, "final journal push failed");
+                    // See the Turso-connect error above: the Display of a
+                    // sync failure can carry TURSO_DATABASE_URL, so only the
+                    // error variant is logged, never its message.
+                    let kind = match &e {
+                        JournalError::Db(_) => "Db",
+                        JournalError::Decode(_) => "Decode",
+                    };
+                    error!(kind, "final journal push failed");
                 }
                 return Ok(());
             }

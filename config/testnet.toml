@@ -27,5 +27,9 @@ stop_fill_timeout_secs = 30
 
 [universe]
 size = 20
-min_turnover_24h = 50000000
+# Testnet-appropriate floor: Bybit testnet 24h turnover runs orders of
+# magnitude below mainnet, so a mainnet-sized floor (tens of millions) would
+# filter out every symbol and leave the probe with nothing to subscribe to.
+# Mainnet should use a much higher floor (e.g. 50000000).
+min_turnover_24h = 1000000
 min_listing_age_days = 30
