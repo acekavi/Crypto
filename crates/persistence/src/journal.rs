@@ -157,18 +157,45 @@ impl Journal {
         Ok(())
     }
 
+    /// Update an order's state and cumulative filled quantity.
+    ///
+    /// `filled_at_ms` records when the fill actually happened — pass
+    /// `Some(now)` when `state` becomes `Filled` or `PartiallyFilled`, and
+    /// `None` for every other transition (e.g. `Cancelled`, `Rejected`).
+    /// When `None`, the existing `filled_at_ms` column is left untouched
+    /// rather than set to NULL, so a later no-fill-time update can never
+    /// erase a fill time already recorded by an earlier call.
     pub async fn update_order_state(
         &self,
         link_id: &str,
         state: OrderState,
         cum_exec_qty: Decimal,
+        filled_at_ms: Option<i64>,
     ) -> Result<(), JournalError> {
-        self.conn
-            .execute(
-                "UPDATE orders SET state = ?1, cum_exec_qty = ?2 WHERE order_link_id = ?3",
-                (state_str(state).to_string(), cum_exec_qty.to_string(), link_id.to_string()),
-            )
-            .await?;
+        match filled_at_ms {
+            Some(ms) => {
+                self.conn
+                    .execute(
+                        "UPDATE orders SET state = ?1, cum_exec_qty = ?2, filled_at_ms = ?3
+                         WHERE order_link_id = ?4",
+                        (
+                            state_str(state).to_string(),
+                            cum_exec_qty.to_string(),
+                            ms,
+                            link_id.to_string(),
+                        ),
+                    )
+                    .await?;
+            }
+            None => {
+                self.conn
+                    .execute(
+                        "UPDATE orders SET state = ?1, cum_exec_qty = ?2 WHERE order_link_id = ?3",
+                        (state_str(state).to_string(), cum_exec_qty.to_string(), link_id.to_string()),
+                    )
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -221,12 +248,17 @@ impl Journal {
         self.scalar_i64("SELECT COUNT(*) FROM orders", ()).await
     }
 
-    /// Filled entries within one UTC day. Counting fills rather than
-    /// placements is what makes cancelled limit orders free of budget cost.
+    /// Filled entries within one UTC day, keyed by when the fill happened
+    /// (`filled_at_ms`), not when the order was placed (`created_at_ms`).
+    /// Counting fills rather than placements is what makes cancelled limit
+    /// orders free of budget cost; using the fill time rather than the
+    /// placement time is what makes a resting PostOnly limit that fills
+    /// after crossing midnight UTC charge against the day it actually
+    /// filled, not the day it was placed.
     pub async fn daily_fill_count(&self, utc_day_start_ms: i64) -> Result<i64, JournalError> {
         self.scalar_i64(
             "SELECT COUNT(*) FROM orders
-             WHERE state = 'Filled' AND created_at_ms >= ?1 AND created_at_ms < ?2",
+             WHERE state = 'Filled' AND filled_at_ms >= ?1 AND filled_at_ms < ?2",
             (utc_day_start_ms, utc_day_start_ms + 86_400_000),
         )
         .await
@@ -242,11 +274,11 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_halt(&self, reason: &str) -> Result<(), JournalError> {
+    pub async fn set_halt(&self, reason: &str, set_at_ms: i64) -> Result<(), JournalError> {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO halt_state (id, reason, set_at_ms) VALUES (1, ?1, ?2)",
-                (reason.to_string(), 0i64),
+                (reason.to_string(), set_at_ms),
             )
             .await?;
         Ok(())

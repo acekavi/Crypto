@@ -16,10 +16,12 @@ pub const MIGRATIONS: &[&str] = &[
         state         TEXT NOT NULL,
         cum_exec_qty  TEXT NOT NULL,
         config_hash   TEXT NOT NULL,
-        created_at_ms INTEGER NOT NULL
+        created_at_ms INTEGER NOT NULL,
+        filled_at_ms  INTEGER
     )",
     "CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at_ms)",
     "CREATE INDEX IF NOT EXISTS idx_orders_state ON orders(state)",
+    "CREATE INDEX IF NOT EXISTS idx_orders_filled_at ON orders(filled_at_ms)",
     "CREATE TABLE IF NOT EXISTS fills (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         order_link_id TEXT NOT NULL,
