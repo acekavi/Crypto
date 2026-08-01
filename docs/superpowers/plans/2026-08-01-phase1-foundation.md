@@ -1192,24 +1192,44 @@ fn candles(prices: &[Decimal]) -> Vec<Candle> {
         .collect()
 }
 
-/// Feeding a series one sample at a time must equal feeding a fresh indicator
-/// the same series — i.e. `update` carries no state that a restart would lose
-/// differently. This is what makes warmup-after-restart trustworthy.
+/// Closed-form EMA over the whole series, written from the definition and
+/// deliberately independent of `Ema` — this is the oracle, so it must not
+/// call the code under test.
+fn ema_reference(prices: &[Decimal], period: usize) -> Option<Decimal> {
+    if prices.len() < period {
+        return None;
+    }
+    let n = Decimal::from(period as u64);
+    let alpha = Decimal::from(2) / (n + Decimal::ONE);
+    let seed = prices[..period]
+        .iter()
+        .fold(Decimal::ZERO, |acc, p| acc + *p)
+        / n;
+    let mut current = seed;
+    for p in &prices[period..] {
+        current = alpha * *p + (Decimal::ONE - alpha) * current;
+    }
+    Some(current)
+}
+
+/// The streaming EMA must agree with a closed-form computation of the same
+/// series. This is the regression guard for `Ema::update`: the oracle is
+/// derived from the definition, so a change in smoothing, seeding, or alpha
+/// makes the two disagree.
 #[test]
-fn ema_incremental_equals_fresh_replay() {
+fn ema_streaming_matches_closed_form_reference() {
     let prices = price_series(200);
     let mut streaming = Ema::new(20);
     for p in &prices {
         streaming.update(*p);
     }
 
-    let mut replayed = Ema::new(20);
-    for p in &prices {
-        replayed.update(*p);
-    }
+    assert_eq!(streaming.value(), ema_reference(&prices, 20));
+    assert!(streaming.value().is_some(), "200 samples must warm a 20-period EMA");
 
-    assert_eq!(streaming.value(), replayed.value());
-    assert!(streaming.value().is_some());
+    // Guard against a vacuous oracle: a different period must give a
+    // different answer, proving the assertion above can actually fail.
+    assert_ne!(ema_reference(&prices, 20), ema_reference(&prices, 50));
 }
 
 #[test]
@@ -4989,6 +5009,20 @@ Task 10 and 11 build the config-hash and journal *mechanism*; Plan 2 wires it in
 One fix applied inline: Task 4's `ClockOffset` test originally bound `let mut clock`, which would not compile against the `AtomicI64` interior-mutability design; Step 4 notes the change to `let clock`.
 
 A second fix applied inline: `PositionRow::into_position` must check size before parsing `side`, because Bybit sends `side: ""` on flat positions. Task 9 Step 3 states this explicitly.
+
+**Amendment (2026-08-01, during Task 3):** Task 3's integration test
+`ema_incremental_equals_fresh_replay` was a tautology — both sides of its
+assertion ran the identical loop over a fresh `Ema`, so it could not fail, and
+the file's name promised a batch comparison it never performed. Replaced with
+`ema_streaming_matches_closed_form_reference`, which compares the streaming EMA
+against an independent closed-form oracle and includes a negative control
+proving the assertion can fail. Approved by the human as an override of the
+original plan text.
+
+**Amendment (2026-08-01, during Task 1):** `round_down_to_step` documented
+"rounds toward zero" while implementing floor (toward negative infinity), with
+no guard on negative input. Doc corrected and a `debug_assert!` added; the two
+zero-divisor guard clauses gained tests.
 
 **Amendment (2026-08-01, pre-execution):** Task 7 originally defined every endpoint twice — as inherent methods on `BybitRest` and again in a delegating `impl ExchangeClient for BybitRest`. That is verbatim duplication of ten signatures with no benefit beyond letting tests skip a trait import. Task 7 now defines the traits first (Step 4), implements every endpoint exactly once inside the trait impl (Step 5), and moves Task 6's three market-data methods into the same impl (Step 6). `impl BybitRest` keeps only the constructor and the get/post/retry plumbing.
 

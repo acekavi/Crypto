@@ -32,24 +32,44 @@ fn candles(prices: &[Decimal]) -> Vec<Candle> {
         .collect()
 }
 
-/// Feeding a series one sample at a time must equal feeding a fresh indicator
-/// the same series — i.e. `update` carries no state that a restart would lose
-/// differently. This is what makes warmup-after-restart trustworthy.
+/// Closed-form EMA over the whole series, written from the definition and
+/// deliberately independent of `Ema` — this is the oracle, so it must not
+/// call the code under test.
+fn ema_reference(prices: &[Decimal], period: usize) -> Option<Decimal> {
+    if prices.len() < period {
+        return None;
+    }
+    let n = Decimal::from(period as u64);
+    let alpha = Decimal::from(2) / (n + Decimal::ONE);
+    let seed = prices[..period]
+        .iter()
+        .fold(Decimal::ZERO, |acc, p| acc + *p)
+        / n;
+    let mut current = seed;
+    for p in &prices[period..] {
+        current = alpha * *p + (Decimal::ONE - alpha) * current;
+    }
+    Some(current)
+}
+
+/// The streaming EMA must agree with a closed-form computation of the same
+/// series. This is the regression guard for `Ema::update`: the oracle is
+/// derived from the definition, so a change in smoothing, seeding, or alpha
+/// makes the two disagree.
 #[test]
-fn ema_incremental_equals_fresh_replay() {
+fn ema_streaming_matches_closed_form_reference() {
     let prices = price_series(200);
     let mut streaming = Ema::new(20);
     for p in &prices {
         streaming.update(*p);
     }
 
-    let mut replayed = Ema::new(20);
-    for p in &prices {
-        replayed.update(*p);
-    }
+    assert_eq!(streaming.value(), ema_reference(&prices, 20));
+    assert!(streaming.value().is_some(), "200 samples must warm a 20-period EMA");
 
-    assert_eq!(streaming.value(), replayed.value());
-    assert!(streaming.value().is_some());
+    // Guard against a vacuous oracle: a different period must give a
+    // different answer, proving the assertion above can actually fail.
+    assert_ne!(ema_reference(&prices, 20), ema_reference(&prices, 50));
 }
 
 #[test]
