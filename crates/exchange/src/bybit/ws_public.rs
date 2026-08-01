@@ -1,0 +1,245 @@
+use botcore::{Candle, Symbol, Timeframe};
+use rust_decimal::Decimal;
+use serde::Deserialize;
+
+use super::transport::ExchangeError;
+use crate::traits::Subscription;
+
+/// Bybit public topic name, e.g. `kline.60.BTCUSDT`.
+pub fn topic_for(sub: &Subscription) -> String {
+    format!("kline.{}.{}", sub.timeframe.as_bybit_interval(), sub.symbol.as_str())
+}
+
+#[derive(Debug, Deserialize)]
+struct KlineFrame {
+    data: Vec<KlineData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KlineData {
+    start: i64,
+    open: String,
+    close: String,
+    high: String,
+    low: String,
+    volume: String,
+    turnover: String,
+    confirm: bool,
+}
+
+fn interval_to_timeframe(interval: &str) -> Result<Timeframe, ExchangeError> {
+    match interval {
+        "60" => Ok(Timeframe::H1),
+        "240" => Ok(Timeframe::H4),
+        other => Err(ExchangeError::Decode(format!("unsupported kline interval {other}"))),
+    }
+}
+
+/// Parse one WebSocket text frame.
+///
+/// Returns `Ok(None)` for frames that are not kline data (subscription acks,
+/// pongs) — those are normal traffic, not failures. Returns an empty vector
+/// when the frame holds only unconfirmed candles.
+#[allow(clippy::type_complexity)]
+pub fn parse_kline_message(
+    raw: &str,
+) -> Result<Option<Vec<(Symbol, Timeframe, Candle)>>, ExchangeError> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| ExchangeError::Decode(format!("ws frame: {e}")))?;
+
+    let Some(topic) = value.get("topic").and_then(|t| t.as_str()) else {
+        return Ok(None);
+    };
+    if !topic.starts_with("kline.") {
+        return Ok(None);
+    }
+
+    // topic is kline.{interval}.{symbol}
+    let mut parts = topic.splitn(3, '.');
+    parts.next();
+    let interval = parts
+        .next()
+        .ok_or_else(|| ExchangeError::Decode(format!("malformed topic {topic}")))?;
+    let symbol_str = parts
+        .next()
+        .ok_or_else(|| ExchangeError::Decode(format!("malformed topic {topic}")))?;
+
+    let tf = interval_to_timeframe(interval)?;
+    let symbol = Symbol::new(symbol_str);
+
+    let frame: KlineFrame = serde_json::from_value(value)
+        .map_err(|e| ExchangeError::Decode(format!("kline frame: {e}")))?;
+
+    let parse = |s: &str, field: &str| -> Result<Decimal, ExchangeError> {
+        s.parse::<Decimal>()
+            .map_err(|e| ExchangeError::Decode(format!("ws kline {field}: {e}")))
+    };
+
+    let mut out = Vec::new();
+    for d in frame.data {
+        // Only confirmed candles matter: an unconfirmed bar is still moving.
+        if !d.confirm {
+            continue;
+        }
+        out.push((
+            symbol.clone(),
+            tf,
+            Candle {
+                open_time_ms: d.start,
+                open: parse(&d.open, "open")?,
+                high: parse(&d.high, "high")?,
+                low: parse(&d.low, "low")?,
+                close: parse(&d.close, "close")?,
+                volume: parse(&d.volume, "volume")?,
+                turnover: parse(&d.turnover, "turnover")?,
+            },
+        ));
+    }
+    Ok(Some(out))
+}
+
+/// How many candles are missing between two consecutive open times.
+///
+/// A reconnect after a dropped socket will resume mid-series; the feed uses
+/// this to decide whether a REST backfill is required before emitting further
+/// events, so indicators never see a hole.
+pub fn missing_candle_count(prev_open_ms: i64, next_open_ms: i64, tf: Timeframe) -> i64 {
+    let step = tf.duration_ms();
+    let delta = next_open_ms - prev_open_ms;
+    if delta <= step {
+        return 0;
+    }
+    delta / step - 1
+}
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::broadcast;
+use tokio_tungstenite::tungstenite::Message;
+use tracing::{error, info, warn};
+
+use super::rest::BybitRest;
+use super::transport::backoff_delay;
+use crate::traits::{ExchangeClient, MarketEvent, MarketFeed};
+
+const PING_INTERVAL: Duration = Duration::from_secs(20);
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
+const GAP_REFETCH_LIMIT: u16 = 200;
+
+/// Public kline feed with automatic reconnect and REST gap backfill.
+pub struct BybitPublicFeed {
+    ws_url: String,
+    rest: Arc<BybitRest>,
+}
+
+impl BybitPublicFeed {
+    pub fn new(ws_url: String, rest: Arc<BybitRest>) -> Self {
+        BybitPublicFeed { ws_url, rest }
+    }
+}
+
+#[async_trait]
+impl MarketFeed for BybitPublicFeed {
+    async fn subscribe(
+        &self,
+        subs: &[Subscription],
+    ) -> Result<broadcast::Receiver<MarketEvent>, ExchangeError> {
+        let (tx, rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let url = self.ws_url.clone();
+        let rest = Arc::clone(&self.rest);
+        let subs = subs.to_vec();
+
+        tokio::spawn(async move {
+            // Last confirmed candle open time per (symbol, timeframe), used to
+            // detect gaps across reconnects.
+            let mut last_open: HashMap<(Symbol, Timeframe), i64> = HashMap::new();
+            let mut attempt: u32 = 0;
+
+            loop {
+                match run_session(&url, &subs, &tx, &rest, &mut last_open).await {
+                    Ok(()) => {
+                        info!("public feed session ended cleanly; reconnecting");
+                        attempt = 0;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, attempt, "public feed session failed");
+                        attempt = attempt.saturating_add(1);
+                    }
+                }
+                tokio::time::sleep(backoff_delay(attempt, 500, 0.25)).await;
+            }
+        });
+
+        Ok(rx)
+    }
+}
+
+/// One connection lifetime: connect, subscribe, pump messages until failure.
+async fn run_session(
+    url: &str,
+    subs: &[Subscription],
+    tx: &broadcast::Sender<MarketEvent>,
+    rest: &BybitRest,
+    last_open: &mut HashMap<(Symbol, Timeframe), i64>,
+) -> Result<(), ExchangeError> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .map_err(|e| ExchangeError::WebSocket(e.to_string()))?;
+
+    let topics: Vec<String> = subs.iter().map(topic_for).collect();
+    let sub_msg = serde_json::json!({ "op": "subscribe", "args": topics }).to_string();
+    ws.send(Message::Text(sub_msg))
+        .await
+        .map_err(|e| ExchangeError::WebSocket(e.to_string()))?;
+
+    info!(count = subs.len(), "subscribed to public kline topics");
+
+    let mut ping = tokio::time::interval(PING_INTERVAL);
+    ping.tick().await; // first tick fires immediately; skip it
+
+    loop {
+        tokio::select! {
+            _ = ping.tick() => {
+                ws.send(Message::Text(r#"{"op":"ping"}"#.into()))
+                    .await
+                    .map_err(|e| ExchangeError::WebSocket(e.to_string()))?;
+            }
+            frame = ws.next() => {
+                let Some(frame) = frame else {
+                    return Err(ExchangeError::WebSocket("stream closed".into()));
+                };
+                let msg = frame.map_err(|e| ExchangeError::WebSocket(e.to_string()))?;
+                let Message::Text(text) = msg else { continue };
+
+                let Some(candles) = parse_kline_message(&text)? else { continue };
+                for (symbol, tf, candle) in candles {
+                    let key = (symbol.clone(), tf);
+                    if let Some(prev) = last_open.get(&key).copied() {
+                        let missing = missing_candle_count(prev, candle.open_time_ms, tf);
+                        if missing > 0 {
+                            warn!(%symbol, missing, "kline gap detected; backfilling via REST");
+                            match rest.klines(&symbol, tf, GAP_REFETCH_LIMIT).await {
+                                Ok(backfill) => {
+                                    let _ = tx.send(MarketEvent::GapFilled {
+                                        symbol: symbol.clone(),
+                                        tf,
+                                        candles: backfill,
+                                    });
+                                }
+                                Err(e) => error!(%symbol, error = %e, "gap backfill failed"),
+                            }
+                        }
+                    }
+                    last_open.insert(key, candle.open_time_ms);
+                    // A send error means no receivers are listening yet; the
+                    // engine may not have started consuming. Not fatal.
+                    let _ = tx.send(MarketEvent::CandleClosed { symbol, tf, candle });
+                }
+            }
+        }
+    }
+}
