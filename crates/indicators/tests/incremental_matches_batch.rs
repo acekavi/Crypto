@@ -1,4 +1,4 @@
-use core::Candle;
+use botcore::Candle;
 use indicators::{Atr, Ema, Rsi};
 use rust_decimal::Decimal;
 

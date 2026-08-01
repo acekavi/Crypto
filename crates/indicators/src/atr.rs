@@ -1,4 +1,4 @@
-use core::Candle;
+use botcore::Candle;
 use rust_decimal::Decimal;
 
 /// Wilder's Average True Range, seeded with a simple average of the first
