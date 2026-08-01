@@ -69,7 +69,7 @@ with an unvalidated strategy is the cheapest way to surface those failures.
 crypto-bot/
 ├── Cargo.toml                 # workspace manifest
 ├── crates/
-│   ├── core/                  # domain types, no I/O, no dependencies on other crates
+│   ├── botcore/               # domain types, no I/O, no dependencies on other crates
 │   ├── exchange/              # ExchangeClient + MarketFeed traits; Bybit V5 implementation
 │   ├── indicators/            # EMA, RSI, ATR — incremental, O(1) per update
 │   ├── strategy/              # Strategy trait + baseline implementation
@@ -79,9 +79,9 @@ crypto-bot/
 └── bot/                       # binary: config, wiring, graceful shutdown
 ```
 
-Dependency direction is strictly downward: `core` depends on nothing internal;
-`indicators`, `exchange`, `persistence` depend only on `core`; `strategy` depends on
-`core` + `indicators`; `risk` on `core`; `engine` on all of them; `bot` wires them.
+Dependency direction is strictly downward: `botcore` depends on nothing internal;
+`indicators`, `exchange`, `persistence` depend only on `botcore`; `strategy` depends on
+`botcore` + `indicators`; `risk` on `botcore`; `engine` on all of them; `bot` wires them.
 No cycles.
 
 ### 3.2 Data flow

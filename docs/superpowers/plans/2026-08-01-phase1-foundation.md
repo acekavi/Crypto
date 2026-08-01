@@ -33,7 +33,7 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 crypto-bot/
 ├── Cargo.toml                       workspace manifest, shared dependency versions
 ├── crates/
-│   ├── core/
+│   ├── botcore/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs               re-exports
@@ -85,8 +85,8 @@ Splitting `bybit/` by responsibility rather than by one large `client.rs` keeps 
 ### Task 1: Workspace scaffold and core money types
 
 **Files:**
-- Create: `Cargo.toml`, `crates/core/Cargo.toml`, `crates/core/src/lib.rs`, `crates/core/src/money.rs`
-- Test: `crates/core/src/money.rs` (inline `#[cfg(test)]` module)
+- Create: `Cargo.toml`, `crates/botcore/Cargo.toml`, `crates/botcore/src/lib.rs`, `crates/botcore/src/money.rs`
+- Test: `crates/botcore/src/money.rs` (inline `#[cfg(test)]` module)
 
 **Interfaces:**
 - Consumes: nothing (first task)
@@ -101,7 +101,7 @@ Create `Cargo.toml`:
 
 ```toml
 [workspace]
-members = ["crates/core", "crates/indicators", "crates/exchange", "crates/persistence", "bot"]
+members = ["crates/botcore", "crates/indicators", "crates/exchange", "crates/persistence", "bot"]
 resolver = "3"
 
 [workspace.package]
@@ -121,11 +121,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 - [ ] **Step 2: Create the core crate manifest**
 
-Create `crates/core/Cargo.toml`:
+Create `crates/botcore/Cargo.toml`:
 
 ```toml
 [package]
-name = "core"
+name = "botcore"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -141,7 +141,7 @@ rust_decimal_macros.workspace = true
 
 - [ ] **Step 3: Write the failing test for rounding helpers**
 
-Create `crates/core/src/money.rs` containing only the test module:
+Create `crates/botcore/src/money.rs` containing only the test module:
 
 ```rust
 #[cfg(test)]
@@ -217,12 +217,12 @@ mod tests {
 
 - [ ] **Step 4: Run the test to verify it fails**
 
-Run: `cargo test -p core`
+Run: `cargo test -p botcore`
 Expected: FAIL — compile error, `round_down_to_step` and `Side` not found.
 
 - [ ] **Step 5: Write the minimal implementation**
 
-Prepend to `crates/core/src/money.rs`:
+Prepend to `crates/botcore/src/money.rs`:
 
 ```rust
 use rust_decimal::Decimal;
@@ -265,7 +265,7 @@ pub fn round_price_away_from_market(price: Decimal, tick: Decimal, side: Side) -
 }
 ```
 
-Create `crates/core/src/order.rs`:
+Create `crates/botcore/src/order.rs`:
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -295,7 +295,7 @@ impl Side {
 }
 ```
 
-Create `crates/core/src/lib.rs`:
+Create `crates/botcore/src/lib.rs`:
 
 ```rust
 pub mod money;
@@ -304,18 +304,18 @@ pub mod order;
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cargo test -p core`
+Run: `cargo test -p botcore`
 Expected: PASS — 5 tests.
 
 - [ ] **Step 7: Add a property test proving rounding never increases size**
 
-Add to `crates/core/Cargo.toml` under `[dev-dependencies]`:
+Add to `crates/botcore/Cargo.toml` under `[dev-dependencies]`:
 
 ```toml
 proptest = "1"
 ```
 
-Append to the `tests` module in `crates/core/src/money.rs`:
+Append to the `tests` module in `crates/botcore/src/money.rs`:
 
 ```rust
     use proptest::prelude::*;
@@ -337,13 +337,13 @@ Append to the `tests` module in `crates/core/src/money.rs`:
 
 - [ ] **Step 8: Run the property test**
 
-Run: `cargo test -p core`
+Run: `cargo test -p botcore`
 Expected: PASS — 6 tests including `round_down_never_exceeds_input`.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add Cargo.toml crates/core
+git add Cargo.toml crates/botcore
 git commit -m "feat(core): workspace scaffold and Decimal rounding helpers
 
 Rounding is directional by design: quantities round down so they can only
@@ -356,8 +356,8 @@ become less aggressive."
 ### Task 2: Core domain types
 
 **Files:**
-- Create: `crates/core/src/symbol.rs`, `crates/core/src/candle.rs`, `crates/core/src/position.rs`, `crates/core/src/error.rs`
-- Modify: `crates/core/src/lib.rs`, `crates/core/src/order.rs`
+- Create: `crates/botcore/src/symbol.rs`, `crates/botcore/src/candle.rs`, `crates/botcore/src/position.rs`, `crates/botcore/src/error.rs`
+- Modify: `crates/botcore/src/lib.rs`, `crates/botcore/src/order.rs`
 
 **Interfaces:**
 - Consumes: `Side` from Task 1
@@ -373,7 +373,7 @@ become less aggressive."
 
 - [ ] **Step 1: Write the failing test for Timeframe**
 
-Create `crates/core/src/candle.rs`:
+Create `crates/botcore/src/candle.rs`:
 
 ```rust
 #[cfg(test)]
@@ -410,12 +410,12 @@ mod tests {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p core`
+Run: `cargo test -p botcore`
 Expected: FAIL — `Timeframe` and `Candle` not found.
 
 - [ ] **Step 3: Implement candle and timeframe types**
 
-Prepend to `crates/core/src/candle.rs`:
+Prepend to `crates/botcore/src/candle.rs`:
 
 ```rust
 use rust_decimal::Decimal;
@@ -468,12 +468,12 @@ impl Candle {
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test -p core`
+Run: `cargo test -p botcore`
 Expected: PASS.
 
 - [ ] **Step 5: Write the failing test for instrument constraints**
 
-Create `crates/core/src/symbol.rs`:
+Create `crates/botcore/src/symbol.rs`:
 
 ```rust
 #[cfg(test)]
@@ -509,12 +509,12 @@ mod tests {
 
 - [ ] **Step 6: Run the test to verify it fails**
 
-Run: `cargo test -p core`
+Run: `cargo test -p botcore`
 Expected: FAIL — `Instrument` not found.
 
 - [ ] **Step 7: Implement symbol and instrument**
 
-Prepend to `crates/core/src/symbol.rs`:
+Prepend to `crates/botcore/src/symbol.rs`:
 
 ```rust
 use rust_decimal::Decimal;
@@ -565,12 +565,12 @@ impl Instrument {
 
 - [ ] **Step 8: Run the test to verify it passes**
 
-Run: `cargo test -p core`
+Run: `cargo test -p botcore`
 Expected: PASS.
 
 - [ ] **Step 9: Add position, balance, order and error types**
 
-Create `crates/core/src/position.rs`:
+Create `crates/botcore/src/position.rs`:
 
 ```rust
 use rust_decimal::Decimal;
@@ -601,7 +601,7 @@ pub struct Balance {
 }
 ```
 
-Create `crates/core/src/error.rs`:
+Create `crates/botcore/src/error.rs`:
 
 ```rust
 /// How the engine should react to a failed exchange interaction.
@@ -617,7 +617,7 @@ pub enum ErrorClass {
 }
 ```
 
-Append to `crates/core/src/order.rs`:
+Append to `crates/botcore/src/order.rs`:
 
 ```rust
 use rust_decimal::Decimal;
@@ -672,7 +672,7 @@ pub struct OpenOrder {
 }
 ```
 
-Replace `crates/core/src/lib.rs`:
+Replace `crates/botcore/src/lib.rs`:
 
 ```rust
 pub mod candle;
@@ -691,13 +691,13 @@ pub use symbol::{Instrument, Symbol};
 
 - [ ] **Step 10: Run the full core test suite**
 
-Run: `cargo test -p core && cargo clippy -p core -- -D warnings`
+Run: `cargo test -p botcore && cargo clippy -p botcore -- -D warnings`
 Expected: PASS, no clippy warnings.
 
 - [ ] **Step 11: Commit**
 
 ```bash
-git add crates/core
+git add crates/botcore
 git commit -m "feat(core): domain types for candles, instruments, orders, positions
 
 LimitEntry has no market-order counterpart by design — the limit-only rule
@@ -732,7 +732,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-core = { path = "../core" }
+botcore = { path = "../botcore" }
 rust_decimal.workspace = true
 
 [dev-dependencies]
@@ -1068,7 +1068,7 @@ Expected: FAIL — `Atr` not found.
 Prepend to `crates/indicators/src/atr.rs`:
 
 ```rust
-use core::Candle;
+use botcore::Candle;
 use rust_decimal::Decimal;
 
 /// Wilder's Average True Range, seeded with a simple average of the first
@@ -1158,7 +1158,7 @@ Expected: PASS — 11 tests total.
 Create `crates/indicators/tests/incremental_matches_batch.rs`:
 
 ```rust
-use core::Candle;
+use botcore::Candle;
 use indicators::{Atr, Ema, Rsi};
 use rust_decimal::Decimal;
 
@@ -1300,7 +1300,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-core = { path = "../core" }
+botcore = { path = "../botcore" }
 async-trait = "0.1"
 futures-util = "0.3"
 hmac = "0.12"
@@ -1580,7 +1580,7 @@ Create `crates/exchange/src/bybit/transport.rs`:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::ErrorClass;
+    use botcore::ErrorClass;
 
     #[test]
     fn rate_limit_codes_are_retryable() {
@@ -1649,7 +1649,7 @@ Prepend to `crates/exchange/src/bybit/transport.rs`:
 ```rust
 use std::time::Duration;
 
-use core::ErrorClass;
+use botcore::ErrorClass;
 
 /// Upper bound on a single backoff sleep. A multi-hour outage should keep the
 /// bot polling at a sane cadence, not sleeping for days.
@@ -1942,7 +1942,7 @@ Expected: FAIL — `KlineRow`, `Envelope` not found.
 Prepend to `crates/exchange/src/bybit/wire.rs`:
 
 ```rust
-use core::{Candle, Instrument, Symbol};
+use botcore::{Candle, Instrument, Symbol};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -2105,7 +2105,7 @@ Expected: PASS — 17 tests total.
 Create `crates/exchange/tests/rest_market_data.rs`:
 
 ```rust
-use core::{Symbol, Timeframe};
+use botcore::{Symbol, Timeframe};
 use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use rust_decimal_macros::dec;
@@ -2243,7 +2243,7 @@ Expected: FAIL — `BybitRest` not found.
 Create `crates/exchange/src/bybit/rest.rs`:
 
 ```rust
-use core::{Candle, Instrument, Symbol, Timeframe};
+use botcore::{Candle, Instrument, Symbol, Timeframe};
 use serde::de::DeserializeOwned;
 use tracing::warn;
 
@@ -2332,7 +2332,7 @@ impl BybitRest {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, ExchangeError>>,
     {
-        use core::ErrorClass;
+        use botcore::ErrorClass;
 
         let mut last: Option<ExchangeError> = None;
         for attempt in 0..MAX_ATTEMPTS {
@@ -2451,7 +2451,7 @@ updates the clock offset used for signing."
 Create `crates/exchange/tests/rest_trading.rs`:
 
 ```rust
-use core::{LimitEntry, Side, Symbol};
+use botcore::{LimitEntry, Side, Symbol};
 use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use rust_decimal_macros::dec;
@@ -2600,7 +2600,7 @@ Expected: FAIL — `place_limit_entry`, `positions`, `balance` not found.
 Append to `crates/exchange/src/bybit/wire.rs`:
 
 ```rust
-use core::{Balance, OpenOrder, OrderState, Position, Side};
+use botcore::{Balance, OpenOrder, OrderState, Position, Side};
 
 #[derive(Debug, Deserialize)]
 pub struct OrderCreateResult {
@@ -2736,7 +2736,7 @@ Create `crates/exchange/src/traits.rs`:
 
 ```rust
 use async_trait::async_trait;
-use core::{Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe};
+use botcore::{Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe};
 use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 
@@ -2814,7 +2814,7 @@ Append to `crates/exchange/src/bybit/rest.rs`:
 
 ```rust
 use async_trait::async_trait;
-use core::{Balance, LimitEntry, OpenOrder, OrderAck, Position};
+use botcore::{Balance, LimitEntry, OpenOrder, OrderAck, Position};
 use rust_decimal::Decimal;
 use serde_json::json;
 
@@ -3129,10 +3129,10 @@ test asserts no file in the workspace can emit a market order."
 Create `crates/exchange/tests/ws_kline_parsing.rs`:
 
 ```rust
-use core::Timeframe;
+use botcore::Timeframe;
 use exchange::bybit::ws_public::{parse_kline_message, topic_for};
 use exchange::Subscription;
-use core::Symbol;
+use botcore::Symbol;
 use rust_decimal_macros::dec;
 
 #[test]
@@ -3203,7 +3203,7 @@ Expected: FAIL — `parse_kline_message`, `topic_for` not found.
 Create `crates/exchange/src/bybit/ws_public.rs`:
 
 ```rust
-use core::{Candle, Symbol, Timeframe};
+use botcore::{Candle, Symbol, Timeframe};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -3551,7 +3551,7 @@ and backfill over REST before resuming."
 Create `crates/exchange/tests/ws_private_parsing.rs`:
 
 ```rust
-use core::{OrderState, Side};
+use botcore::{OrderState, Side};
 use exchange::bybit::sign::Credentials;
 use exchange::bybit::ws_private::{build_auth_frame, parse_private_message, AccountEvent};
 use rust_decimal_macros::dec;
@@ -3634,7 +3634,7 @@ Expected: FAIL — `build_auth_frame`, `parse_private_message`, `AccountEvent` n
 Create `crates/exchange/src/bybit/ws_private.rs`:
 
 ```rust
-use core::{Balance, OpenOrder, Position, Symbol};
+use botcore::{Balance, OpenOrder, Position, Symbol};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -3903,7 +3903,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-core = { path = "../core" }
+botcore = { path = "../botcore" }
 rust_decimal.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -3923,7 +3923,7 @@ If the `turso` crate's published version or feature name differs at implementati
 Create `crates/persistence/tests/journal_roundtrip.rs`:
 
 ```rust
-use core::{OrderState, Side, Symbol};
+use botcore::{OrderState, Side, Symbol};
 use persistence::{Journal, OrderRecord};
 use rust_decimal_macros::dec;
 
@@ -4093,7 +4093,7 @@ pub const MIGRATIONS: &[&str] = &[
 Create `crates/persistence/src/journal.rs`:
 
 ```rust
-use core::{OrderState, Side, Symbol};
+use botcore::{OrderState, Side, Symbol};
 use rust_decimal::Decimal;
 use turso::{Builder, Connection, Database};
 
@@ -4412,7 +4412,7 @@ Expected: PASS — 6 tests, no clippy warnings.
 Create `crates/persistence/tests/sync_isolation.rs`:
 
 ```rust
-use core::{OrderState, Side, Symbol};
+use botcore::{OrderState, Side, Symbol};
 use persistence::{Journal, OrderRecord};
 use rust_decimal_macros::dec;
 
@@ -4611,7 +4611,7 @@ name = "bot"
 path = "src/lib.rs"
 
 [dependencies]
-core = { path = "../crates/core" }
+core = { path = "../crates/botcore" }
 exchange = { path = "../crates/exchange" }
 indicators = { path = "../crates/indicators" }
 persistence = { path = "../crates/persistence" }
@@ -4821,7 +4821,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bot::config::{Config, Profile};
-use core::{Symbol, Timeframe};
+use botcore::{Symbol, Timeframe};
 use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use exchange::bybit::ws_public::BybitPublicFeed;
