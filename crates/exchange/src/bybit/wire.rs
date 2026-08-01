@@ -21,7 +21,10 @@ impl<T> Envelope<T> {
         if self.ret_code == 0 {
             Ok(self.result)
         } else {
-            Err(ExchangeError::Api { code: self.ret_code, msg: self.ret_msg })
+            Err(ExchangeError::Api {
+                code: self.ret_code,
+                msg: self.ret_msg,
+            })
         }
     }
 }
@@ -257,7 +260,9 @@ impl OpenOrderRow {
             "Cancelled" | "Deactivated" => OrderState::Cancelled,
             "Rejected" => OrderState::Rejected,
             other => {
-                return Err(ExchangeError::Decode(format!("unknown orderStatus {other}")))
+                return Err(ExchangeError::Decode(format!(
+                    "unknown orderStatus {other}"
+                )));
             }
         };
         Ok(OpenOrder {
@@ -303,7 +308,8 @@ mod tests {
     fn kline_rows_parse_from_bybit_string_arrays() {
         // Bybit returns klines as arrays of strings:
         // [startTime, open, high, low, close, volume, turnover]
-        let raw = r#"["1700000000000","42000.5","42500.0","41800.25","42100.75","123.45","5200000.5"]"#;
+        let raw =
+            r#"["1700000000000","42000.5","42500.0","41800.25","42100.75","123.45","5200000.5"]"#;
         let row: KlineRow = serde_json::from_str(raw).expect("row parses");
         let candle = row.into_candle().expect("row converts");
 
@@ -320,7 +326,9 @@ mod tests {
     fn envelope_surfaces_nonzero_ret_code_as_api_error() {
         let raw = r#"{"retCode":110007,"retMsg":"insufficient balance","result":{},"time":1700000000000}"#;
         let env: Envelope<serde_json::Value> = serde_json::from_str(raw).expect("envelope parses");
-        let err = env.into_result().expect_err("nonzero retCode must be an error");
+        let err = env
+            .into_result()
+            .expect_err("nonzero retCode must be an error");
         match err {
             ExchangeError::Api { code, ref msg } => {
                 assert_eq!(code, 110007);

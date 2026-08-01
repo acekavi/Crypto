@@ -7,15 +7,14 @@ use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use exchange::bybit::ws_public::BybitPublicFeed;
 use exchange::{ExchangeClient, MarketEvent, MarketFeed, Subscription};
-use persistence::{spawn_sync_task, Journal};
+use persistence::{Journal, spawn_sync_task};
 use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -41,9 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tickers = rest.tickers().await?;
     let mut ranked: Vec<_> = tickers
         .into_iter()
-        .filter(|t| {
-            t.turnover_24h >= rust_decimal::Decimal::from(config.universe.min_turnover_24h)
-        })
+        .filter(|t| t.turnover_24h >= rust_decimal::Decimal::from(config.universe.min_turnover_24h))
         .collect();
     ranked.sort_by_key(|t| std::cmp::Reverse(t.turnover_24h));
     ranked.truncate(config.universe.size);
@@ -51,7 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Prove the journal works, falling back to local-only when Turso is
     //    not configured or unreachable — never a reason to refuse to start.
-    let journal = match (std::env::var("TURSO_DATABASE_URL"), std::env::var("TURSO_AUTH_TOKEN")) {
+    let journal = match (
+        std::env::var("TURSO_DATABASE_URL"),
+        std::env::var("TURSO_AUTH_TOKEN"),
+    ) {
         (Ok(url), Ok(token)) if !url.is_empty() && !token.is_empty() => {
             match Journal::open_synced("data/bot.db", &url, &token).await {
                 Ok(j) => {
@@ -78,7 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subs: Vec<Subscription> = ranked
         .iter()
         .take(3)
-        .map(|t| Subscription { symbol: Symbol::new(t.symbol.as_str()), timeframe: Timeframe::H1 })
+        .map(|t| Subscription {
+            symbol: Symbol::new(t.symbol.as_str()),
+            timeframe: Timeframe::H1,
+        })
         .collect();
     let mut rx = feed.subscribe(&subs).await?;
     info!(symbols = ?subs.iter().map(|s| s.symbol.as_str()).collect::<Vec<_>>(), "streaming klines");

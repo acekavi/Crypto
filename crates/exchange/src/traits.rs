@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use botcore::{Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe};
+use botcore::{
+    Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe,
+};
 use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 
@@ -42,9 +44,17 @@ pub trait ExchangeClient: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum MarketEvent {
     /// A candle that has closed and will not change again.
-    CandleClosed { symbol: Symbol, tf: Timeframe, candle: Candle },
+    CandleClosed {
+        symbol: Symbol,
+        tf: Timeframe,
+        candle: Candle,
+    },
     /// The feed reconnected and refilled a gap; indicators should be rewarmed.
-    GapFilled { symbol: Symbol, tf: Timeframe, candles: Vec<Candle> },
+    GapFilled {
+        symbol: Symbol,
+        tf: Timeframe,
+        candles: Vec<Candle>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

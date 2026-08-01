@@ -2,7 +2,7 @@ use botcore::{Balance, ErrorClass, OpenOrder, Position, Symbol};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::sign::{sign_ws_auth, Credentials};
+use super::sign::{Credentials, sign_ws_auth};
 use super::transport::ExchangeError;
 use super::wire::{OpenOrderRow, PositionRow, WalletRow};
 
@@ -12,7 +12,9 @@ pub enum AccountEvent {
     OrderUpdate(OpenOrder),
     PositionUpdate(Position),
     /// Emitted when the exchange reports size 0 — the position is gone.
-    PositionClosed { symbol: Symbol },
+    PositionClosed {
+        symbol: Symbol,
+    },
     WalletUpdate(Balance),
 }
 
@@ -157,7 +159,11 @@ pub struct BybitPrivateFeed {
 
 impl BybitPrivateFeed {
     pub fn new(ws_url: String, creds: Credentials, clock: Arc<ClockOffset>) -> Self {
-        BybitPrivateFeed { ws_url, creds, clock }
+        BybitPrivateFeed {
+            ws_url,
+            creds,
+            clock,
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AccountEvent> {

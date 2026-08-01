@@ -2,18 +2,27 @@ use bot::config::{Config, ConfigError, Profile};
 
 #[test]
 fn testnet_profile_points_at_testnet_hosts() {
-    assert_eq!(Profile::Testnet.rest_base_url(), "https://api-testnet.bybit.com");
+    assert_eq!(
+        Profile::Testnet.rest_base_url(),
+        "https://api-testnet.bybit.com"
+    );
     assert_eq!(
         Profile::Testnet.ws_public_url(),
         "wss://stream-testnet.bybit.com/v5/public/linear"
     );
-    assert_eq!(Profile::Testnet.ws_private_url(), "wss://stream-testnet.bybit.com/v5/private");
+    assert_eq!(
+        Profile::Testnet.ws_private_url(),
+        "wss://stream-testnet.bybit.com/v5/private"
+    );
 }
 
 #[test]
 fn mainnet_profile_points_at_mainnet_hosts() {
     assert_eq!(Profile::Mainnet.rest_base_url(), "https://api.bybit.com");
-    assert_eq!(Profile::Mainnet.ws_public_url(), "wss://stream.bybit.com/v5/public/linear");
+    assert_eq!(
+        Profile::Mainnet.ws_public_url(),
+        "wss://stream.bybit.com/v5/public/linear"
+    );
 }
 
 #[test]
@@ -29,14 +38,20 @@ fn mainnet_requires_an_explicit_confirmation_variable() {
 #[test]
 fn mainnet_is_allowed_once_confirmed() {
     temp_env::with_var("BYBIT_ALLOW_MAINNET", Some("yes"), || {
-        assert_eq!(Profile::from_name("mainnet").expect("confirmed"), Profile::Mainnet);
+        assert_eq!(
+            Profile::from_name("mainnet").expect("confirmed"),
+            Profile::Mainnet
+        );
     });
 }
 
 #[test]
 fn testnet_never_requires_confirmation() {
     temp_env::with_var_unset("BYBIT_ALLOW_MAINNET", || {
-        assert_eq!(Profile::from_name("testnet").expect("testnet is always allowed"), Profile::Testnet);
+        assert_eq!(
+            Profile::from_name("testnet").expect("testnet is always allowed"),
+            Profile::Testnet
+        );
     });
 }
 
@@ -48,7 +63,11 @@ fn config_hash_is_stable_and_parameter_sensitive() {
 
     let changed = Config::from_toml_str(&SAMPLE.replace("risk_pct = 0.01", "risk_pct = 0.02"))
         .expect("parses");
-    assert_ne!(a.hash(), changed.hash(), "changing a rule must change the hash");
+    assert_ne!(
+        a.hash(),
+        changed.hash(),
+        "changing a rule must change the hash"
+    );
     assert_eq!(a.hash().len(), 64, "hash is a SHA-256 hex digest");
 }
 

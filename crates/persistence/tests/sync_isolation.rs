@@ -23,7 +23,9 @@ async fn local_writes_succeed_when_the_cloud_is_unreachable() {
     // config wiring does in Task 11. Either way, local persistence must work.
     let journal = match journal {
         Ok(j) => j,
-        Err(_) => Journal::open_local(path.to_str().unwrap()).await.expect("local fallback opens"),
+        Err(_) => Journal::open_local(path.to_str().unwrap())
+            .await
+            .expect("local fallback opens"),
     };
 
     journal

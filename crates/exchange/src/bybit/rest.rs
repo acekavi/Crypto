@@ -1,16 +1,18 @@
 use async_trait::async_trait;
-use botcore::{Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe};
+use botcore::{
+    Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe,
+};
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use tracing::warn;
 
 use super::rate_limit::RateLimiter;
-use super::sign::{local_now_ms, sign_rest, ClockOffset, Credentials};
-use super::transport::{backoff_delay, ExchangeError};
+use super::sign::{ClockOffset, Credentials, local_now_ms, sign_rest};
+use super::transport::{ExchangeError, backoff_delay};
 use super::wire::{
-    Envelope, InstrumentRow, KlineResult, ListResult, OpenOrderRow, OrderCreateResult,
-    PositionRow, Ticker, TickerRow, WalletRow,
+    Envelope, InstrumentRow, KlineResult, ListResult, OpenOrderRow, OrderCreateResult, PositionRow,
+    Ticker, TickerRow, WalletRow,
 };
 use crate::traits::ExchangeClient;
 
@@ -64,7 +66,13 @@ impl BybitRest {
         self.with_retry(|| async {
             self.limiter.acquire().await;
             let ts = self.clock.now_ms();
-            let sign = sign_rest(&self.creds.api_secret, ts, &self.creds.api_key, RECV_WINDOW, &query);
+            let sign = sign_rest(
+                &self.creds.api_secret,
+                ts,
+                &self.creds.api_key,
+                RECV_WINDOW,
+                &query,
+            );
             let url = format!("{}{}?{}", self.base_url, path, query);
 
             let resp = self
@@ -102,8 +110,13 @@ impl BybitRest {
             async move {
                 self.limiter.acquire().await;
                 let ts = self.clock.now_ms();
-                let sign =
-                    sign_rest(&self.creds.api_secret, ts, &self.creds.api_key, RECV_WINDOW, &body_str);
+                let sign = sign_rest(
+                    &self.creds.api_secret,
+                    ts,
+                    &self.creds.api_key,
+                    RECV_WINDOW,
+                    &body_str,
+                );
                 let url = format!("{}{}", self.base_url, path);
 
                 let resp = self
@@ -146,7 +159,8 @@ impl BybitRest {
                     }
                     warn!(attempt, error = %e, "retryable exchange error");
                     last = Some(e);
-                    tokio::time::sleep(backoff_delay(attempt, BACKOFF_BASE_MS, BACKOFF_JITTER)).await;
+                    tokio::time::sleep(backoff_delay(attempt, BACKOFF_BASE_MS, BACKOFF_JITTER))
+                        .await;
                 }
             }
         }
@@ -165,7 +179,10 @@ impl ExchangeClient for BybitRest {
     /// All linear perpetual instruments currently in `Trading` status.
     async fn instruments(&self) -> Result<Vec<Instrument>, ExchangeError> {
         let res: ListResult<InstrumentRow> = self
-            .get("/v5/market/instruments-info", &[("category", "linear".into())])
+            .get(
+                "/v5/market/instruments-info",
+                &[("category", "linear".into())],
+            )
             .await?;
         let mut out = Vec::with_capacity(res.list.len());
         for row in res.list {
@@ -204,8 +221,11 @@ impl ExchangeClient for BybitRest {
             )
             .await?;
 
-        let mut candles: Vec<Candle> =
-            res.list.into_iter().map(|r| r.into_candle()).collect::<Result<_, _>>()?;
+        let mut candles: Vec<Candle> = res
+            .list
+            .into_iter()
+            .map(|r| r.into_candle())
+            .collect::<Result<_, _>>()?;
         candles.sort_by_key(|c| c.open_time_ms);
         Ok(candles)
     }
@@ -234,7 +254,10 @@ impl ExchangeClient for BybitRest {
         });
 
         let res: OrderCreateResult = self.post("/v5/order/create", body).await?;
-        Ok(OrderAck { order_id: res.order_id, order_link_id: res.order_link_id })
+        Ok(OrderAck {
+            order_id: res.order_id,
+            order_link_id: res.order_link_id,
+        })
     }
 
     async fn cancel_order(&self, symbol: &Symbol, link_id: &str) -> Result<(), ExchangeError> {
@@ -281,7 +304,10 @@ impl ExchangeClient for BybitRest {
 
     async fn positions(&self) -> Result<Vec<Position>, ExchangeError> {
         let res: ListResult<PositionRow> = self
-            .get("/v5/position/list", &[("category", "linear".into()), ("settleCoin", "USDT".into())])
+            .get(
+                "/v5/position/list",
+                &[("category", "linear".into()), ("settleCoin", "USDT".into())],
+            )
             .await?;
         let mut out = Vec::new();
         for row in res.list {
@@ -294,14 +320,23 @@ impl ExchangeClient for BybitRest {
 
     async fn open_orders(&self) -> Result<Vec<OpenOrder>, ExchangeError> {
         let res: ListResult<OpenOrderRow> = self
-            .get("/v5/order/realtime", &[("category", "linear".into()), ("settleCoin", "USDT".into())])
+            .get(
+                "/v5/order/realtime",
+                &[("category", "linear".into()), ("settleCoin", "USDT".into())],
+            )
             .await?;
-        res.list.into_iter().map(OpenOrderRow::into_open_order).collect()
+        res.list
+            .into_iter()
+            .map(OpenOrderRow::into_open_order)
+            .collect()
     }
 
     async fn balance(&self) -> Result<Balance, ExchangeError> {
         let res: ListResult<WalletRow> = self
-            .get("/v5/account/wallet-balance", &[("accountType", "UNIFIED".into())])
+            .get(
+                "/v5/account/wallet-balance",
+                &[("accountType", "UNIFIED".into())],
+            )
             .await?;
         res.list
             .into_iter()

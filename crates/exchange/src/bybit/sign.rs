@@ -42,8 +42,8 @@ impl std::fmt::Debug for Credentials {
 }
 
 pub(crate) fn hmac_hex(secret: &str, message: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts keys of any length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
     mac.update(message.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -59,7 +59,10 @@ pub fn sign_rest(
     recv_window: u32,
     payload: &str,
 ) -> String {
-    hmac_hex(secret, &format!("{timestamp_ms}{api_key}{recv_window}{payload}"))
+    hmac_hex(
+        secret,
+        &format!("{timestamp_ms}{api_key}{recv_window}{payload}"),
+    )
 }
 
 /// Private WebSocket auth signature: HMAC_SHA256 over "GET/realtime" + expires.
@@ -80,12 +83,15 @@ pub struct ClockOffset {
 
 impl ClockOffset {
     pub fn new() -> Self {
-        ClockOffset { offset_ms: AtomicI64::new(0) }
+        ClockOffset {
+            offset_ms: AtomicI64::new(0),
+        }
     }
 
     /// Record an observation of the server clock against our own.
     pub fn observe(&self, server_time_ms: i64, local_time_ms: i64) {
-        self.offset_ms.store(server_time_ms - local_time_ms, Ordering::Relaxed);
+        self.offset_ms
+            .store(server_time_ms - local_time_ms, Ordering::Relaxed);
     }
 
     pub fn offset_ms(&self) -> i64 {
@@ -120,16 +126,24 @@ mod tests {
     // Computed independently with:
     //   printf '1700000000000testkey5000{"symbol":"BTCUSDT"}' \
     //     | openssl dgst -sha256 -hmac testsecret
-    const EXPECTED: &str =
-        "2e7c2adf786003c873babfab26e2c27092b5d7f1f1e493a00a0491d5b42a8634";
+    const EXPECTED: &str = "2e7c2adf786003c873babfab26e2c27092b5d7f1f1e493a00a0491d5b42a8634";
 
     #[test]
     fn rest_signature_concatenates_in_the_documented_order() {
-        let sig = sign_rest("testsecret", 1_700_000_000_000, "testkey", 5000, r#"{"symbol":"BTCUSDT"}"#);
+        let sig = sign_rest(
+            "testsecret",
+            1_700_000_000_000,
+            "testkey",
+            5000,
+            r#"{"symbol":"BTCUSDT"}"#,
+        );
         // Length and alphabet are what we assert deterministically; the exact
         // digest is pinned by the golden test below once generated locally.
         assert_eq!(sig.len(), 64, "HMAC-SHA256 hex must be 64 chars");
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            sig.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         assert_eq!(sig, EXPECTED, "signature drifted from the pinned vector");
     }
 

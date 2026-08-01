@@ -35,8 +35,16 @@ impl Rsi {
         let prev = self.prev_price.replace(price)?;
 
         let delta = price - prev;
-        let gain = if delta > Decimal::ZERO { delta } else { Decimal::ZERO };
-        let loss = if delta < Decimal::ZERO { -delta } else { Decimal::ZERO };
+        let gain = if delta > Decimal::ZERO {
+            delta
+        } else {
+            Decimal::ZERO
+        };
+        let loss = if delta < Decimal::ZERO {
+            -delta
+        } else {
+            Decimal::ZERO
+        };
 
         match (self.avg_gain, self.avg_loss) {
             (Some(ag), Some(al)) => {

@@ -93,7 +93,10 @@ impl Journal {
     pub async fn open_local(path: &str) -> Result<Self, JournalError> {
         let db = turso::Builder::new_local(path).build().await?;
         let conn = db.connect()?;
-        let j = Journal { db: DbHandle::Local(db), conn };
+        let j = Journal {
+            db: DbHandle::Local(db),
+            conn,
+        };
         j.migrate().await?;
         Ok(j)
     }
@@ -105,7 +108,10 @@ impl Journal {
             .build()
             .await?;
         let conn = db.connect().await?;
-        let j = Journal { db: DbHandle::Synced(db), conn };
+        let j = Journal {
+            db: DbHandle::Synced(db),
+            conn,
+        };
         j.migrate().await?;
         Ok(j)
     }
@@ -191,7 +197,11 @@ impl Journal {
                 self.conn
                     .execute(
                         "UPDATE orders SET state = ?1, cum_exec_qty = ?2 WHERE order_link_id = ?3",
-                        (state_str(state).to_string(), cum_exec_qty.to_string(), link_id.to_string()),
+                        (
+                            state_str(state).to_string(),
+                            cum_exec_qty.to_string(),
+                            link_id.to_string(),
+                        ),
                     )
                     .await?;
             }
@@ -199,7 +209,10 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn order_by_link_id(&self, link_id: &str) -> Result<Option<OrderRecord>, JournalError> {
+    pub async fn order_by_link_id(
+        &self,
+        link_id: &str,
+    ) -> Result<Option<OrderRecord>, JournalError> {
         let mut rows = self
             .conn
             .query(
@@ -210,7 +223,9 @@ impl Journal {
             )
             .await?;
 
-        let Some(row) = rows.next().await? else { return Ok(None) };
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
         let get_text = |i: usize| -> Result<String, JournalError> {
             row.get_value(i)
                 .map_err(|e| JournalError::Db(e.to_string()))?
@@ -221,7 +236,10 @@ impl Journal {
 
         Ok(Some(OrderRecord {
             order_link_id: get_text(0)?,
-            order_id: row.get_value(1).ok().and_then(|v| v.as_text().map(|s| s.to_string())),
+            order_id: row
+                .get_value(1)
+                .ok()
+                .and_then(|v| v.as_text().map(|s| s.to_string())),
             symbol: Symbol::new(get_text(2)?),
             side: match get_text(3)?.as_str() {
                 "Buy" => Side::Buy,
@@ -285,13 +303,20 @@ impl Journal {
     }
 
     pub async fn clear_halt(&self) -> Result<(), JournalError> {
-        self.conn.execute("DELETE FROM halt_state WHERE id = 1", ()).await?;
+        self.conn
+            .execute("DELETE FROM halt_state WHERE id = 1", ())
+            .await?;
         Ok(())
     }
 
     pub async fn halt_reason(&self) -> Result<Option<String>, JournalError> {
-        let mut rows = self.conn.query("SELECT reason FROM halt_state WHERE id = 1", ()).await?;
-        let Some(row) = rows.next().await? else { return Ok(None) };
+        let mut rows = self
+            .conn
+            .query("SELECT reason FROM halt_state WHERE id = 1", ())
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
         Ok(row
             .get_value(0)
             .map_err(|e| JournalError::Db(e.to_string()))?
@@ -305,7 +330,9 @@ impl Journal {
         params: impl turso::params::IntoParams,
     ) -> Result<i64, JournalError> {
         let mut rows = self.conn.query(sql, params).await?;
-        let Some(row) = rows.next().await? else { return Ok(0) };
+        let Some(row) = rows.next().await? else {
+            return Ok(0);
+        };
         Ok(row
             .get_value(0)
             .map_err(|e| JournalError::Db(e.to_string()))?

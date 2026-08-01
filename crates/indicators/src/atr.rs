@@ -52,7 +52,9 @@ impl Atr {
         let range = candle.high - candle.low;
         match self.prev_close {
             None => range,
-            Some(pc) => range.max((candle.high - pc).abs()).max((candle.low - pc).abs()),
+            Some(pc) => range
+                .max((candle.high - pc).abs())
+                .max((candle.low - pc).abs()),
         }
     }
 
@@ -86,7 +88,10 @@ mod tests {
     fn first_true_range_is_high_minus_low() {
         let mut atr = Atr::new(1);
         // With period 1 the seed completes on the first candle.
-        assert_eq!(atr.update(&candle(dec!(10), dec!(8), dec!(9))), Some(dec!(2)));
+        assert_eq!(
+            atr.update(&candle(dec!(10), dec!(8), dec!(9))),
+            Some(dec!(2))
+        );
     }
 
     #[test]
@@ -95,7 +100,10 @@ mod tests {
         atr.update(&candle(dec!(10), dec!(8), dec!(9)));
         // Gap up: high 20, low 19, prev close 9. TR = max(1, 11, 10) = 11.
         // period 1 -> ATR tracks TR exactly.
-        assert_eq!(atr.update(&candle(dec!(20), dec!(19), dec!(19))), Some(dec!(11)));
+        assert_eq!(
+            atr.update(&candle(dec!(20), dec!(19), dec!(19))),
+            Some(dec!(11))
+        );
     }
 
     #[test]

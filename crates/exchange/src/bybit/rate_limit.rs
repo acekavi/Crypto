@@ -68,7 +68,10 @@ mod tests {
         for _ in 0..5 {
             limiter.acquire().await;
         }
-        assert!(start.elapsed() < Duration::from_millis(50), "burst was throttled");
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "burst was throttled"
+        );
     }
 
     #[tokio::test]
@@ -81,7 +84,13 @@ mod tests {
         let start = Instant::now();
         limiter.acquire().await;
         let waited = start.elapsed();
-        assert!(waited >= Duration::from_millis(400), "did not throttle: {waited:?}");
-        assert!(waited < Duration::from_millis(900), "throttled too long: {waited:?}");
+        assert!(
+            waited >= Duration::from_millis(400),
+            "did not throttle: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_millis(900),
+            "throttled too long: {waited:?}"
+        );
     }
 }

@@ -72,6 +72,9 @@ mod tests {
             volume: Default::default(),
             turnover: Default::default(),
         };
-        assert_eq!(c.close_time_ms(Timeframe::H1), 1_700_000_000_000 + 3_600_000 - 1);
+        assert_eq!(
+            c.close_time_ms(Timeframe::H1),
+            1_700_000_000_000 + 3_600_000 - 1
+        );
     }
 }

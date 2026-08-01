@@ -1,11 +1,14 @@
 use botcore::{OrderState, Side};
 use exchange::bybit::sign::Credentials;
-use exchange::bybit::ws_private::{build_auth_frame, parse_private_message, AccountEvent};
+use exchange::bybit::ws_private::{AccountEvent, build_auth_frame, parse_private_message};
 use rust_decimal_macros::dec;
 
 #[test]
 fn auth_frame_has_the_documented_shape() {
-    let creds = Credentials { api_key: "mykey".into(), api_secret: "mysecret".into() };
+    let creds = Credentials {
+        api_key: "mykey".into(),
+        api_secret: "mysecret".into(),
+    };
     let frame = build_auth_frame(&creds, 1_700_000_005_000);
     let v: serde_json::Value = serde_json::from_str(&frame).expect("valid json");
 
@@ -66,6 +69,14 @@ fn wallet_updates_carry_equity() {
 
 #[test]
 fn auth_and_subscribe_acks_produce_no_events() {
-    assert!(parse_private_message(r#"{"op":"auth","success":true}"#).unwrap().is_empty());
-    assert!(parse_private_message(r#"{"op":"subscribe","success":true}"#).unwrap().is_empty());
+    assert!(
+        parse_private_message(r#"{"op":"auth","success":true}"#)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        parse_private_message(r#"{"op":"subscribe","success":true}"#)
+            .unwrap()
+            .is_empty()
+    );
 }

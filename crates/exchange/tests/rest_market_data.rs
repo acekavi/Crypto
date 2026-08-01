@@ -1,14 +1,17 @@
 use botcore::{Symbol, Timeframe};
+use exchange::ExchangeClient;
 use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use exchange::bybit::transport::ExchangeError;
-use exchange::ExchangeClient;
 use rust_decimal_macros::dec;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn creds() -> Credentials {
-    Credentials { api_key: "k".into(), api_secret: "s".into() }
+    Credentials {
+        api_key: "k".into(),
+        api_secret: "s".into(),
+    }
 }
 
 #[tokio::test]
@@ -45,7 +48,10 @@ async fn klines_are_returned_oldest_first() {
         .expect("klines fetch succeeds");
 
     assert_eq!(candles.len(), 2);
-    assert_eq!(candles[0].open_time_ms, 1_700_000_000_000, "oldest must come first");
+    assert_eq!(
+        candles[0].open_time_ms, 1_700_000_000_000,
+        "oldest must come first"
+    );
     assert_eq!(candles[1].open_time_ms, 1_700_003_600_000);
     assert_eq!(candles[0].close, dec!(100.5));
 }
@@ -81,9 +87,16 @@ async fn non_trading_instruments_are_filtered_out() {
         .await;
 
     let client = BybitRest::new(server.uri(), creds());
-    let instruments = client.instruments().await.expect("instruments fetch succeeds");
+    let instruments = client
+        .instruments()
+        .await
+        .expect("instruments fetch succeeds");
 
-    assert_eq!(instruments.len(), 1, "delivering instrument must be dropped");
+    assert_eq!(
+        instruments.len(),
+        1,
+        "delivering instrument must be dropped"
+    );
     assert_eq!(instruments[0].symbol.as_str(), "BTCUSDT");
     assert_eq!(instruments[0].tick_size, dec!(0.1));
 }
@@ -107,7 +120,11 @@ async fn server_time_updates_the_clock_offset() {
 
     // The mock's server time is far in the past relative to now, so the offset
     // must have moved off its zero default.
-    assert_ne!(client.clock().offset_ms(), 0, "clock offset was never observed");
+    assert_ne!(
+        client.clock().offset_ms(),
+        0,
+        "clock offset was never observed"
+    );
 }
 
 #[tokio::test]

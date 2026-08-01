@@ -21,7 +21,10 @@ pub enum ExchangeError {
     WebSocket(String),
 
     #[error("retries exhausted after {attempts} attempts: {last}")]
-    RetriesExhausted { attempts: u32, last: Box<ExchangeError> },
+    RetriesExhausted {
+        attempts: u32,
+        last: Box<ExchangeError>,
+    },
 }
 
 impl ExchangeError {

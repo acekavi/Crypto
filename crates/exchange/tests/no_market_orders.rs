@@ -67,7 +67,9 @@ fn every_order_type_literal_is_limit() {
             continue;
         }
         for (lineno, line) in text.lines().enumerate() {
-            if line.contains("OrderType") && line.contains('"') && !line.trim_start().starts_with("//")
+            if line.contains("OrderType")
+                && line.contains('"')
+                && !line.trim_start().starts_with("//")
             {
                 assert!(
                     !line.contains("\"Market\""),

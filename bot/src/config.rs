@@ -13,7 +13,10 @@ pub enum ConfigError {
     MainnetNotConfirmed,
 
     #[error("could not read config file {path}: {source}")]
-    Io { path: String, source: std::io::Error },
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
 
     #[error("invalid config: {0}")]
     Parse(#[from] toml::de::Error),
@@ -122,8 +125,10 @@ pub struct Config {
 impl Config {
     pub fn load(profile: Profile) -> Result<Self, ConfigError> {
         let path = format!("config/{}.toml", profile.name());
-        let text = std::fs::read_to_string(&path)
-            .map_err(|source| ConfigError::Io { path: path.clone(), source })?;
+        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io {
+            path: path.clone(),
+            source,
+        })?;
         Self::from_toml_str(&text)
     }
 

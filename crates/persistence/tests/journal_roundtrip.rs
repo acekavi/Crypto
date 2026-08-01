@@ -5,7 +5,9 @@ use rust_decimal_macros::dec;
 async fn temp_journal() -> (Journal, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("test.db");
-    let j = Journal::open_local(path.to_str().unwrap()).await.expect("journal opens");
+    let j = Journal::open_local(path.to_str().unwrap())
+        .await
+        .expect("journal opens");
     (j, dir)
 }
 
@@ -29,9 +31,15 @@ fn order(link_id: &str, day_ms: i64) -> OrderRecord {
 #[tokio::test]
 async fn order_round_trips_through_the_journal() {
     let (j, _dir) = temp_journal().await;
-    j.record_order(&order("link-1", 1_700_000_000_000)).await.expect("recorded");
+    j.record_order(&order("link-1", 1_700_000_000_000))
+        .await
+        .expect("recorded");
 
-    let fetched = j.order_by_link_id("link-1").await.expect("query ok").expect("row exists");
+    let fetched = j
+        .order_by_link_id("link-1")
+        .await
+        .expect("query ok")
+        .expect("row exists");
     assert_eq!(fetched.symbol.as_str(), "BTCUSDT");
     assert_eq!(fetched.price, dec!(42000.5));
     assert_eq!(fetched.state, OrderState::New);
@@ -42,8 +50,12 @@ async fn order_round_trips_through_the_journal() {
 async fn recording_the_same_link_id_twice_does_not_duplicate() {
     // orderLinkId is the idempotency key; a retry must not create a second row.
     let (j, _dir) = temp_journal().await;
-    j.record_order(&order("link-1", 1)).await.expect("first insert");
-    j.record_order(&order("link-1", 1)).await.expect("second insert is a no-op");
+    j.record_order(&order("link-1", 1))
+        .await
+        .expect("first insert");
+    j.record_order(&order("link-1", 1))
+        .await
+        .expect("second insert is a no-op");
     assert_eq!(j.order_count().await.expect("count"), 1);
 }
 
@@ -55,7 +67,11 @@ async fn order_state_updates_in_place() {
         .await
         .expect("updated");
 
-    let fetched = j.order_by_link_id("link-1").await.expect("query ok").expect("row exists");
+    let fetched = j
+        .order_by_link_id("link-1")
+        .await
+        .expect("query ok")
+        .expect("row exists");
     assert_eq!(fetched.state, OrderState::Filled);
     assert_eq!(fetched.cum_exec_qty, dec!(0.01));
 }
@@ -77,7 +93,9 @@ async fn daily_fill_count_only_counts_filled_orders_in_that_utc_day() {
     ] {
         j.record_order(&order(id, ts)).await.expect("recorded");
         if state == OrderState::Filled {
-            j.update_order_state(id, state, dec!(0.01), Some(ts)).await.expect("filled");
+            j.update_order_state(id, state, dec!(0.01), Some(ts))
+                .await
+                .expect("filled");
         }
     }
 
@@ -98,13 +116,30 @@ async fn daily_fill_count_uses_fill_time_not_placement_time() {
     let placed_at = day_n_plus_1 - 1_000; // 23:59:59.000 on day N
     let filled_at = day_n_plus_1 + 1_000; // 00:00:01.000 on day N+1
 
-    j.record_order(&order("cross-midnight", placed_at)).await.expect("recorded");
-    j.update_order_state("cross-midnight", OrderState::Filled, dec!(0.01), Some(filled_at))
+    j.record_order(&order("cross-midnight", placed_at))
         .await
-        .expect("filled");
+        .expect("recorded");
+    j.update_order_state(
+        "cross-midnight",
+        OrderState::Filled,
+        dec!(0.01),
+        Some(filled_at),
+    )
+    .await
+    .expect("filled");
 
-    assert_eq!(j.daily_fill_count(day_n).await.expect("count for placement day"), 0);
-    assert_eq!(j.daily_fill_count(day_n_plus_1).await.expect("count for fill day"), 1);
+    assert_eq!(
+        j.daily_fill_count(day_n)
+            .await
+            .expect("count for placement day"),
+        0
+    );
+    assert_eq!(
+        j.daily_fill_count(day_n_plus_1)
+            .await
+            .expect("count for fill day"),
+        1
+    );
 }
 
 #[tokio::test]
@@ -115,12 +150,17 @@ async fn halt_state_survives_reopening_the_database() {
 
     {
         let j = Journal::open_local(p).await.expect("opens");
-        j.set_halt("daily drawdown -5%", 1_700_000_000_000).await.expect("halt set");
+        j.set_halt("daily drawdown -5%", 1_700_000_000_000)
+            .await
+            .expect("halt set");
     }
 
     // A restart must not clear the halt — that is the whole point of persisting it.
     let j = Journal::open_local(p).await.expect("reopens");
-    assert_eq!(j.halt_reason().await.expect("query"), Some("daily drawdown -5%".to_string()));
+    assert_eq!(
+        j.halt_reason().await.expect("query"),
+        Some("daily drawdown -5%".to_string())
+    );
 }
 
 #[tokio::test]

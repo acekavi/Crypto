@@ -7,7 +7,11 @@ use crate::traits::Subscription;
 
 /// Bybit public topic name, e.g. `kline.60.BTCUSDT`.
 pub fn topic_for(sub: &Subscription) -> String {
-    format!("kline.{}.{}", sub.timeframe.as_bybit_interval(), sub.symbol.as_str())
+    format!(
+        "kline.{}.{}",
+        sub.timeframe.as_bybit_interval(),
+        sub.symbol.as_str()
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,7 +35,9 @@ fn interval_to_timeframe(interval: &str) -> Result<Timeframe, ExchangeError> {
     match interval {
         "60" => Ok(Timeframe::H1),
         "240" => Ok(Timeframe::H4),
-        other => Err(ExchangeError::Decode(format!("unsupported kline interval {other}"))),
+        other => Err(ExchangeError::Decode(format!(
+            "unsupported kline interval {other}"
+        ))),
     }
 }
 
@@ -44,8 +50,8 @@ fn interval_to_timeframe(interval: &str) -> Result<Timeframe, ExchangeError> {
 pub fn parse_kline_message(
     raw: &str,
 ) -> Result<Option<Vec<(Symbol, Timeframe, Candle)>>, ExchangeError> {
-    let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| ExchangeError::Decode(format!("ws frame: {e}")))?;
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| ExchangeError::Decode(format!("ws frame: {e}")))?;
 
     let Some(topic) = value.get("topic").and_then(|t| t.as_str()) else {
         return Ok(None);

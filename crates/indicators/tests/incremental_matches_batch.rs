@@ -8,7 +8,9 @@ fn price_series(n: usize) -> Vec<Decimal> {
     let mut state: u64 = 0x2545F491_4F6CDD1D;
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             // Prices in the 900..1100 range with two decimal places.
             let cents = 90_000 + (state >> 40) % 20_000;
             Decimal::new(cents as i64, 2)
@@ -65,7 +67,10 @@ fn ema_streaming_matches_closed_form_reference() {
     }
 
     assert_eq!(streaming.value(), ema_reference(&prices, 20));
-    assert!(streaming.value().is_some(), "200 samples must warm a 20-period EMA");
+    assert!(
+        streaming.value().is_some(),
+        "200 samples must warm a 20-period EMA"
+    );
 
     // Guard against a vacuous oracle: a different period must give a
     // different answer, proving the assertion above can actually fail.

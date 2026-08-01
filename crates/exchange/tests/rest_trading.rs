@@ -1,13 +1,16 @@
 use botcore::{LimitEntry, Side, Symbol};
+use exchange::ExchangeClient;
 use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
-use exchange::ExchangeClient;
 use rust_decimal_macros::dec;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn creds() -> Credentials {
-    Credentials { api_key: "k".into(), api_secret: "s".into() }
+    Credentials {
+        api_key: "k".into(),
+        api_secret: "s".into(),
+    }
 }
 
 fn entry() -> LimitEntry {
@@ -58,7 +61,10 @@ async fn entry_is_sent_as_a_postonly_limit_with_protection_attached() {
         .await;
 
     let client = BybitRest::new(server.uri(), creds());
-    let ack = client.place_limit_entry(entry()).await.expect("order placed");
+    let ack = client
+        .place_limit_entry(entry())
+        .await
+        .expect("order placed");
     assert_eq!(ack.order_id, "oid-1");
     assert_eq!(ack.order_link_id, "abc123");
 }
@@ -88,7 +94,10 @@ async fn positions_parse_liquidation_price_as_optional() {
 
     assert_eq!(positions.len(), 2);
     assert_eq!(positions[0].liq_price, Some(dec!(38000)));
-    assert_eq!(positions[1].liq_price, None, "empty liqPrice must become None");
+    assert_eq!(
+        positions[1].liq_price, None,
+        "empty liqPrice must become None"
+    );
     assert_eq!(positions[1].side, Side::Sell);
 }
 
