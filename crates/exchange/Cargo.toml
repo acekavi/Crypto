@@ -1,0 +1,31 @@
+[package]
+name = "exchange"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Aliased: the domain crate is literally named `core`, which shadows the
+# sysroot `core` crate's extern-prelude entry for any direct dependent.
+# thiserror's derive macro expands to `::core::fmt::...` etc., so with the
+# unaliased name every `#[derive(thiserror::Error)]` in this crate fails to
+# compile ("cannot find `write`/`fmt` in `core`"). Aliasing to `core_types`
+# keeps the collision out of this crate without renaming the shared package.
+core_types = { path = "../core", package = "core" }
+async-trait = "0.1"
+futures-util = "0.3"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+tracing.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+wiremock = "0.6"
