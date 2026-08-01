@@ -61,11 +61,26 @@ impl KlineRow {
 
 #[derive(Debug, Deserialize)]
 pub struct KlineResult {
+    // Bybit sends `"result": {}` on error responses (nonzero retCode), which
+    // has no `list` key at all. Without `#[serde(default)]` that fails to
+    // deserialize, and the whole `Envelope<T>` parse fails before the retCode
+    // can be surfaced as `ExchangeError::Api` and before the clock offset is
+    // observed from the response's `time` field.
+    #[serde(default)]
     pub list: Vec<KlineRow>,
 }
 
+// `bound(deserialize = ...)` overrides serde's derive-macro bound inference,
+// which conservatively adds `T: Default` for any generic field carrying
+// `#[serde(default)]` even though `Vec<T>: Default` holds for every `T`
+// unconditionally. Only the bound actually required — `T: Deserialize<'de>`,
+// needed to deserialize the elements — is declared here.
 #[derive(Debug, Deserialize)]
+#[serde(bound(deserialize = "T: Deserialize<'de>"))]
 pub struct ListResult<T> {
+    // See the comment on `KlineResult::list`: Bybit's `result: {}` on error
+    // responses must still deserialize so the envelope's retCode/time survive.
+    #[serde(default)]
     pub list: Vec<T>,
 }
 
