@@ -4,9 +4,19 @@ use crate::order::Side;
 
 /// Round `value` down to the nearest multiple of `step`.
 ///
-/// Always rounds toward zero. Used for order quantities, where rounding up
-/// would push realized risk above the configured budget.
+/// Rounds toward negative infinity (mathematical floor). This is the correct
+/// direction for non-negative quantities: a smaller multiple means a smaller
+/// order size and thus reduced risk. Used for order quantities, where rounding
+/// up would push realized risk above the configured budget.
+///
+/// # Precondition
+/// This function expects `value` to be non-negative. Negative quantities are
+/// not a valid use case; callers must ensure this invariant.
 pub fn round_down_to_step(value: Decimal, step: Decimal) -> Decimal {
+    debug_assert!(
+        !value.is_sign_negative(),
+        "round_down_to_step expects a non-negative quantity, got {value}"
+    );
     if step.is_zero() {
         return value;
     }
@@ -76,6 +86,27 @@ mod tests {
         assert_eq!(
             round_price_away_from_market(dec!(100.56), dec!(0.01), Side::Sell),
             dec!(100.56)
+        );
+    }
+
+    #[test]
+    fn zero_step_returns_value_unchanged() {
+        // When step is zero, guard prevents division and returns input unchanged.
+        assert_eq!(round_down_to_step(dec!(0.123), dec!(0)), dec!(0.123));
+        assert_eq!(round_down_to_step(dec!(42.0), dec!(0)), dec!(42.0));
+    }
+
+    #[test]
+    fn zero_tick_returns_price_unchanged() {
+        // When tick is zero, guard prevents division and returns input unchanged.
+        // This is true for both Buy and Sell sides.
+        assert_eq!(
+            round_price_away_from_market(dec!(100.567), dec!(0), Side::Buy),
+            dec!(100.567)
+        );
+        assert_eq!(
+            round_price_away_from_market(dec!(100.567), dec!(0), Side::Sell),
+            dec!(100.567)
         );
     }
 
