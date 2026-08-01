@@ -12,3 +12,6 @@
 *.db-wal
 /data
 /logs
+
+# graphify knowledge base — regenerable, contains machine-specific absolute paths
+graphify-out/
