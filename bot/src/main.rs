@@ -8,7 +8,8 @@ use exchange::bybit::sign::Credentials;
 use exchange::bybit::ws_public::BybitPublicFeed;
 use exchange::{ExchangeClient, MarketEvent, MarketFeed, Subscription};
 use persistence::{Journal, JournalError, spawn_sync_task};
-use tracing::{error, info};
+use tokio::sync::broadcast::error::RecvError;
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,6 +18,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+
+    // rustls 0.23 refuses to pick a crypto provider when more than one is
+    // compiled in — reqwest and tokio-tungstenite pull different ones — and it
+    // panics deep inside the WebSocket handshake rather than failing at
+    // startup. Choose explicitly here, before anything opens a connection.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("no rustls crypto provider may be installed before this point");
 
     let profile_name = std::env::args()
         .nth(1)
@@ -144,7 +153,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(MarketEvent::GapFilled { symbol, candles, .. }) => {
                     info!(%symbol, count = candles.len(), "gap backfilled");
                 }
-                Err(e) => error!(error = %e, "feed channel error"),
+                // A closed channel means the feed task itself has ended. That
+                // is the signal a Fatal feed error uses to reach us, and it is
+                // never transient — continuing here would spin the loop at
+                // full CPU logging the same line millions of times a second.
+                Err(RecvError::Closed) => {
+                    error!("market feed channel closed; the feed task has died");
+                    return Err("market feed channel closed".into());
+                }
+                // Lagged means we fell behind a live feed, not that it died.
+                Err(RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "probe fell behind the market feed");
+                }
             },
         }
     }

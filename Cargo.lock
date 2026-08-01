@@ -359,6 +359,7 @@ dependencies = [
  "indicators",
  "persistence",
  "rust_decimal",
+ "rustls",
  "serde",
  "sha2",
  "temp-env",
