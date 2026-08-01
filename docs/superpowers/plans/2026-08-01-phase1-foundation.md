@@ -2389,14 +2389,15 @@ updates the clock offset used for signing."
 
 **Files:**
 - Create: `crates/exchange/src/traits.rs`
-- Modify: `crates/exchange/src/bybit/rest.rs`, `crates/exchange/src/bybit/wire.rs`, `crates/exchange/src/lib.rs`
+- Modify: `crates/exchange/src/bybit/rest.rs`, `crates/exchange/src/bybit/wire.rs`, `crates/exchange/src/lib.rs`, `crates/exchange/tests/rest_market_data.rs`
 - Test: `crates/exchange/tests/rest_trading.rs`, `crates/exchange/tests/no_market_orders.rs`
 
 **Interfaces:**
 - Consumes: `BybitRest` (Task 6), `LimitEntry`, `OrderAck`, `OpenOrder`, `OrderState`, `Position`, `Balance` (Task 2)
 - Produces:
   - `trait ExchangeClient` with the ten methods from the spec — and no market-order method
-  - `BybitRest::place_limit_entry`, `cancel_order`, `amend_stop`, `positions`, `open_orders`, `set_leverage`, `balance`
+  - `impl ExchangeClient for BybitRest` holding the **only** definition of each of the ten endpoints. Task 6's three market-data methods move into this impl; no inherent duplicates remain, and nothing delegates.
+  - `impl BybitRest` retains only `new`, `clock`, `get`, `post`, `with_retry`
 
 - [ ] **Step 1: Write the failing trading-endpoint test**
 
@@ -2682,15 +2683,95 @@ impl WalletRow {
 }
 ```
 
-- [ ] **Step 4: Implement the signed POST helper and trading endpoints**
+- [ ] **Step 4: Define the ExchangeClient and MarketFeed traits**
+
+Create `crates/exchange/src/traits.rs`:
+
+```rust
+use async_trait::async_trait;
+use core::{Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe};
+use rust_decimal::Decimal;
+use tokio::sync::broadcast;
+
+use crate::bybit::transport::ExchangeError;
+use crate::bybit::wire::Ticker;
+
+/// Everything the engine may ask of an exchange.
+///
+/// There is deliberately no `place_market_order`. Phase 2's SimulatedExchange
+/// implements this same trait, which is what lets the backtester drive the
+/// identical pipeline as live trading.
+///
+/// These are the *only* definitions of these operations — `BybitRest` has no
+/// inherent duplicates of them. Callers import the trait.
+#[async_trait]
+pub trait ExchangeClient: Send + Sync {
+    async fn instruments(&self) -> Result<Vec<Instrument>, ExchangeError>;
+    async fn tickers(&self) -> Result<Vec<Ticker>, ExchangeError>;
+    async fn klines(
+        &self,
+        symbol: &Symbol,
+        tf: Timeframe,
+        limit: u16,
+    ) -> Result<Vec<Candle>, ExchangeError>;
+    async fn place_limit_entry(&self, req: LimitEntry) -> Result<OrderAck, ExchangeError>;
+    async fn amend_stop(
+        &self,
+        symbol: &Symbol,
+        trigger: Decimal,
+        limit_price: Decimal,
+    ) -> Result<(), ExchangeError>;
+    async fn cancel_order(&self, symbol: &Symbol, link_id: &str) -> Result<(), ExchangeError>;
+    async fn positions(&self) -> Result<Vec<Position>, ExchangeError>;
+    async fn open_orders(&self) -> Result<Vec<OpenOrder>, ExchangeError>;
+    async fn set_leverage(&self, symbol: &Symbol, leverage: Decimal) -> Result<(), ExchangeError>;
+    async fn balance(&self) -> Result<Balance, ExchangeError>;
+}
+
+/// A market data event delivered by a feed.
+#[derive(Debug, Clone)]
+pub enum MarketEvent {
+    /// A candle that has closed and will not change again.
+    CandleClosed { symbol: Symbol, tf: Timeframe, candle: Candle },
+    /// The feed reconnected and refilled a gap; indicators should be rewarmed.
+    GapFilled { symbol: Symbol, tf: Timeframe, candles: Vec<Candle> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subscription {
+    pub symbol: Symbol,
+    pub timeframe: Timeframe,
+}
+
+#[async_trait]
+pub trait MarketFeed: Send + Sync {
+    async fn subscribe(
+        &self,
+        subs: &[Subscription],
+    ) -> Result<broadcast::Receiver<MarketEvent>, ExchangeError>;
+}
+```
+
+Replace `crates/exchange/src/lib.rs`:
+
+```rust
+pub mod bybit;
+pub mod traits;
+
+pub use traits::{ExchangeClient, MarketEvent, MarketFeed, Subscription};
+```
+
+- [ ] **Step 5: Implement the signed POST helper and the ExchangeClient impl**
 
 Append to `crates/exchange/src/bybit/rest.rs`:
 
 ```rust
+use async_trait::async_trait;
 use core::{Balance, LimitEntry, OpenOrder, OrderAck, Position};
 use rust_decimal::Decimal;
 use serde_json::json;
 
+use crate::traits::ExchangeClient;
 use super::wire::{OpenOrderRow, OrderCreateResult, PositionRow, WalletRow};
 
 impl BybitRest {
@@ -2735,12 +2816,18 @@ impl BybitRest {
         })
         .await
     }
+}
 
+// Endpoint methods live here and nowhere else — there are no inherent
+// duplicates to keep in sync. `impl BybitRest` above holds only the
+// constructor and the shared get/post/with_retry plumbing.
+#[async_trait]
+impl ExchangeClient for BybitRest {
     /// Place a PostOnly limit entry with stop and target attached.
     ///
     /// This is the only order-placing method in the workspace. `orderType` is
     /// hard-coded to `"Limit"` and no parameter can change it.
-    pub async fn place_limit_entry(&self, req: LimitEntry) -> Result<OrderAck, ExchangeError> {
+    async fn place_limit_entry(&self, req: LimitEntry) -> Result<OrderAck, ExchangeError> {
         let body = json!({
             "category": "linear",
             "symbol": req.symbol.as_str(),
@@ -2763,7 +2850,7 @@ impl BybitRest {
         Ok(OrderAck { order_id: res.order_id, order_link_id: res.order_link_id })
     }
 
-    pub async fn cancel_order(&self, symbol: &Symbol, link_id: &str) -> Result<(), ExchangeError> {
+    async fn cancel_order(&self, symbol: &Symbol, link_id: &str) -> Result<(), ExchangeError> {
         let body = json!({
             "category": "linear",
             "symbol": symbol.as_str(),
@@ -2774,7 +2861,7 @@ impl BybitRest {
     }
 
     /// Move a position's stop, keeping it a limit order.
-    pub async fn amend_stop(
+    async fn amend_stop(
         &self,
         symbol: &Symbol,
         trigger: Decimal,
@@ -2793,7 +2880,7 @@ impl BybitRest {
         Ok(())
     }
 
-    pub async fn set_leverage(&self, symbol: &Symbol, leverage: Decimal) -> Result<(), ExchangeError> {
+    async fn set_leverage(&self, symbol: &Symbol, leverage: Decimal) -> Result<(), ExchangeError> {
         let lev = leverage.normalize().to_string();
         let body = json!({
             "category": "linear",
@@ -2805,7 +2892,7 @@ impl BybitRest {
         Ok(())
     }
 
-    pub async fn positions(&self) -> Result<Vec<Position>, ExchangeError> {
+    async fn positions(&self) -> Result<Vec<Position>, ExchangeError> {
         let res: ListResult<PositionRow> = self
             .get("/v5/position/list", &[("category", "linear".into()), ("settleCoin", "USDT".into())])
             .await?;
@@ -2818,14 +2905,14 @@ impl BybitRest {
         Ok(out)
     }
 
-    pub async fn open_orders(&self) -> Result<Vec<OpenOrder>, ExchangeError> {
+    async fn open_orders(&self) -> Result<Vec<OpenOrder>, ExchangeError> {
         let res: ListResult<OpenOrderRow> = self
             .get("/v5/order/realtime", &[("category", "linear".into()), ("settleCoin", "USDT".into())])
             .await?;
         res.list.into_iter().map(OpenOrderRow::into_open_order).collect()
     }
 
-    pub async fn balance(&self) -> Result<Balance, ExchangeError> {
+    async fn balance(&self) -> Result<Balance, ExchangeError> {
         let res: ListResult<WalletRow> = self
             .get("/v5/account/wallet-balance", &[("accountType", "UNIFIED".into())])
             .await?;
@@ -2838,12 +2925,35 @@ impl BybitRest {
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: Move the market-data methods into the trait impl**
 
-Run: `cargo test -p exchange --test rest_trading`
-Expected: PASS — 4 tests.
+Task 6 defined `instruments`, `tickers` and `klines` as inherent methods on
+`BybitRest`, because the trait did not exist yet. Move all three into the
+`impl ExchangeClient for BybitRest` block now — cut them from `impl BybitRest`,
+paste them into the trait impl, and change each `pub async fn` to `async fn`.
+Their bodies do not change. When you are done, `impl BybitRest` must contain
+only `new`, `clock`, `get`, `post` and `with_retry`.
 
-- [ ] **Step 6: Write the limit-only enforcement test**
+This leaves exactly one definition of every endpoint. Do not leave inherent
+copies that delegate to the trait, or vice versa.
+
+Then add the trait import to the two test files that call these methods —
+`crates/exchange/tests/rest_market_data.rs` and
+`crates/exchange/tests/rest_trading.rs`:
+
+```rust
+use exchange::ExchangeClient;
+```
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `cargo test -p exchange --test rest_trading --test rest_market_data`
+Expected: PASS — 8 tests (4 trading + 4 market data).
+
+If a method is reported as both inherent and trait-provided, an inherent copy
+was left behind in Step 6; delete it rather than renaming it.
+
+- [ ] **Step 8: Write the limit-only enforcement test**
 
 Create `crates/exchange/tests/no_market_orders.rs`:
 
@@ -2930,141 +3040,10 @@ fn every_order_type_literal_is_limit() {
 }
 ```
 
-- [ ] **Step 7: Run the enforcement test**
+- [ ] **Step 9: Run the enforcement test**
 
 Run: `cargo test -p exchange --test no_market_orders`
 Expected: PASS — 2 tests. If it fails, a market-order literal has been introduced; remove it rather than weakening the test.
-
-- [ ] **Step 8: Define the ExchangeClient and MarketFeed traits**
-
-Create `crates/exchange/src/traits.rs`:
-
-```rust
-use async_trait::async_trait;
-use core::{Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe};
-use rust_decimal::Decimal;
-use tokio::sync::broadcast;
-
-use crate::bybit::transport::ExchangeError;
-use crate::bybit::wire::Ticker;
-
-/// Everything the engine may ask of an exchange.
-///
-/// There is deliberately no `place_market_order`. Phase 2's SimulatedExchange
-/// implements this same trait, which is what lets the backtester drive the
-/// identical pipeline as live trading.
-#[async_trait]
-pub trait ExchangeClient: Send + Sync {
-    async fn instruments(&self) -> Result<Vec<Instrument>, ExchangeError>;
-    async fn tickers(&self) -> Result<Vec<Ticker>, ExchangeError>;
-    async fn klines(
-        &self,
-        symbol: &Symbol,
-        tf: Timeframe,
-        limit: u16,
-    ) -> Result<Vec<Candle>, ExchangeError>;
-    async fn place_limit_entry(&self, req: LimitEntry) -> Result<OrderAck, ExchangeError>;
-    async fn amend_stop(
-        &self,
-        symbol: &Symbol,
-        trigger: Decimal,
-        limit_price: Decimal,
-    ) -> Result<(), ExchangeError>;
-    async fn cancel_order(&self, symbol: &Symbol, link_id: &str) -> Result<(), ExchangeError>;
-    async fn positions(&self) -> Result<Vec<Position>, ExchangeError>;
-    async fn open_orders(&self) -> Result<Vec<OpenOrder>, ExchangeError>;
-    async fn set_leverage(&self, symbol: &Symbol, leverage: Decimal) -> Result<(), ExchangeError>;
-    async fn balance(&self) -> Result<Balance, ExchangeError>;
-}
-
-/// A market data event delivered by a feed.
-#[derive(Debug, Clone)]
-pub enum MarketEvent {
-    /// A candle that has closed and will not change again.
-    CandleClosed { symbol: Symbol, tf: Timeframe, candle: Candle },
-    /// The feed reconnected and refilled a gap; indicators should be rewarmed.
-    GapFilled { symbol: Symbol, tf: Timeframe, candles: Vec<Candle> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Subscription {
-    pub symbol: Symbol,
-    pub timeframe: Timeframe,
-}
-
-#[async_trait]
-pub trait MarketFeed: Send + Sync {
-    async fn subscribe(
-        &self,
-        subs: &[Subscription],
-    ) -> Result<broadcast::Receiver<MarketEvent>, ExchangeError>;
-}
-```
-
-- [ ] **Step 9: Implement the trait for BybitRest**
-
-Append to `crates/exchange/src/bybit/rest.rs`:
-
-```rust
-use async_trait::async_trait;
-
-use crate::traits::ExchangeClient;
-
-// Thin delegation: the inherent methods stay usable directly (which keeps the
-// wiremock tests simple) while the trait enables swapping in a simulator.
-#[async_trait]
-impl ExchangeClient for BybitRest {
-    async fn instruments(&self) -> Result<Vec<Instrument>, ExchangeError> {
-        BybitRest::instruments(self).await
-    }
-    async fn tickers(&self) -> Result<Vec<super::wire::Ticker>, ExchangeError> {
-        BybitRest::tickers(self).await
-    }
-    async fn klines(
-        &self,
-        symbol: &Symbol,
-        tf: Timeframe,
-        limit: u16,
-    ) -> Result<Vec<Candle>, ExchangeError> {
-        BybitRest::klines(self, symbol, tf, limit).await
-    }
-    async fn place_limit_entry(&self, req: LimitEntry) -> Result<OrderAck, ExchangeError> {
-        BybitRest::place_limit_entry(self, req).await
-    }
-    async fn amend_stop(
-        &self,
-        symbol: &Symbol,
-        trigger: Decimal,
-        limit_price: Decimal,
-    ) -> Result<(), ExchangeError> {
-        BybitRest::amend_stop(self, symbol, trigger, limit_price).await
-    }
-    async fn cancel_order(&self, symbol: &Symbol, link_id: &str) -> Result<(), ExchangeError> {
-        BybitRest::cancel_order(self, symbol, link_id).await
-    }
-    async fn positions(&self) -> Result<Vec<Position>, ExchangeError> {
-        BybitRest::positions(self).await
-    }
-    async fn open_orders(&self) -> Result<Vec<OpenOrder>, ExchangeError> {
-        BybitRest::open_orders(self).await
-    }
-    async fn set_leverage(&self, symbol: &Symbol, leverage: Decimal) -> Result<(), ExchangeError> {
-        BybitRest::set_leverage(self, symbol, leverage).await
-    }
-    async fn balance(&self) -> Result<Balance, ExchangeError> {
-        BybitRest::balance(self).await
-    }
-}
-```
-
-Update `crates/exchange/src/lib.rs`:
-
-```rust
-pub mod bybit;
-pub mod traits;
-
-pub use traits::{ExchangeClient, MarketEvent, MarketFeed, Subscription};
-```
 
 - [ ] **Step 10: Run the full exchange suite**
 
@@ -4983,6 +4962,8 @@ Task 10 and 11 build the config-hash and journal *mechanism*; Plan 2 wires it in
 One fix applied inline: Task 4's `ClockOffset` test originally bound `let mut clock`, which would not compile against the `AtomicI64` interior-mutability design; Step 4 notes the change to `let clock`.
 
 A second fix applied inline: `PositionRow::into_position` must check size before parsing `side`, because Bybit sends `side: ""` on flat positions. Task 9 Step 3 states this explicitly.
+
+**Amendment (2026-08-01, pre-execution):** Task 7 originally defined every endpoint twice — as inherent methods on `BybitRest` and again in a delegating `impl ExchangeClient for BybitRest`. That is verbatim duplication of ten signatures with no benefit beyond letting tests skip a trait import. Task 7 now defines the traits first (Step 4), implements every endpoint exactly once inside the trait impl (Step 5), and moves Task 6's three market-data methods into the same impl (Step 6). `impl BybitRest` keeps only the constructor and the get/post/retry plumbing.
 
 ---
 
