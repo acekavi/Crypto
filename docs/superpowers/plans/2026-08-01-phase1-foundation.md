@@ -192,6 +192,26 @@ mod tests {
             dec!(100.56)
         );
     }
+
+    // The zero-divisor guards exist so a malformed instrument spec cannot
+    // panic the sizer. Without these tests a refactor could drop the guard
+    // and nothing would notice.
+    #[test]
+    fn zero_step_returns_value_unchanged() {
+        assert_eq!(round_down_to_step(dec!(0.123), dec!(0)), dec!(0.123));
+    }
+
+    #[test]
+    fn zero_tick_returns_price_unchanged() {
+        assert_eq!(
+            round_price_away_from_market(dec!(100.567), dec!(0), Side::Buy),
+            dec!(100.567)
+        );
+        assert_eq!(
+            round_price_away_from_market(dec!(100.567), dec!(0), Side::Sell),
+            dec!(100.567)
+        );
+    }
 }
 ```
 
@@ -211,9 +231,16 @@ use crate::order::Side;
 
 /// Round `value` down to the nearest multiple of `step`.
 ///
-/// Always rounds toward zero. Used for order quantities, where rounding up
-/// would push realized risk above the configured budget.
+/// Rounds toward negative infinity. Callers must pass a non-negative value —
+/// this is only ever used for order quantities, where rounding up would push
+/// realized risk above the configured budget. On a negative input, floor moves
+/// *away* from zero, which is the risk-increasing direction, so the
+/// precondition is asserted rather than silently tolerated.
 pub fn round_down_to_step(value: Decimal, step: Decimal) -> Decimal {
+    debug_assert!(
+        !value.is_sign_negative(),
+        "round_down_to_step expects a non-negative quantity, got {value}"
+    );
     if step.is_zero() {
         return value;
     }
