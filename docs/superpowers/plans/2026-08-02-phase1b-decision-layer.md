@@ -67,7 +67,7 @@ Splitting `risk` three ways keeps each file focused on one question: *how big*, 
 **Interfaces:**
 - Consumes: `botcore::{Candle, Instrument, Side, Symbol, Timeframe}`
 - Produces:
-  - `Signal { symbol: Symbol, side: Side, entry_price: Decimal, stop_price: Decimal, target_price: Decimal, signal_candle_open_ms: i64 }` with `Signal::risk_distance(&self) -> Decimal`
+  - `Signal { symbol: Symbol, side: Side, entry_price: Decimal, stop_price: Decimal, target_price: Decimal, atr: Decimal, signal_candle_open_ms: i64 }` with `Signal::risk_distance(&self) -> Decimal`
   - `MarketContext<'a> { symbol: &'a Symbol, timeframe: Timeframe, candle: &'a Candle, instrument: &'a Instrument }`
   - `trait Strategy` with `timeframes()`, `warmup_candles()`, `on_candle_close(&mut self, ctx: &MarketContext) -> Option<Signal>`
 
