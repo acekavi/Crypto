@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 
 use botcore::{Candle, Symbol, Timeframe};
@@ -123,6 +124,21 @@ impl CandleStore {
             None => true,
             Some(last) => now_ms - last >= 2 * tf.duration_ms(),
         }
+    }
+
+    /// Drop streams for symbols no longer being tracked.
+    ///
+    /// The universe re-ranks daily and this process runs for months, so without
+    /// this the map accumulates a permanent entry for every symbol that ever
+    /// entered the ranking. Callers pass the current universe; everything else
+    /// is forgotten.
+    ///
+    /// Returns the number of streams removed, so a caller can log rotation
+    /// rather than have memory quietly change size.
+    pub fn retain_symbols(&mut self, keep: &HashSet<Symbol>) -> usize {
+        let before = self.streams.len();
+        self.streams.retain(|(symbol, _), _| keep.contains(symbol));
+        before - self.streams.len()
     }
 }
 
@@ -279,5 +295,64 @@ mod tests {
             s.accept(&btc(), Timeframe::H1, &candle(i * H1));
         }
         assert_eq!(s.window_len(&btc(), Timeframe::H1), 3);
+    }
+
+    #[test]
+    fn pruning_leaves_a_kept_symbols_stream_untouched() {
+        let mut s = CandleStore::new(1);
+        s.warm(&btc(), Timeframe::H1, vec![candle(0)]);
+        let mut keep = HashSet::new();
+        keep.insert(btc());
+        s.retain_symbols(&keep);
+        assert_eq!(s.last_open_ms(&btc(), Timeframe::H1), Some(0));
+    }
+
+    #[test]
+    fn pruning_drops_a_symbol_absent_from_keep() {
+        let mut s = CandleStore::new(1);
+        s.warm(&btc(), Timeframe::H1, vec![candle(0)]);
+        s.retain_symbols(&HashSet::new());
+        assert_eq!(s.last_open_ms(&btc(), Timeframe::H1), None);
+    }
+
+    #[test]
+    fn pruning_a_symbol_drops_both_of_its_timeframes() {
+        // The key is (symbol, timeframe); a naive filter keyed only on the
+        // symbol half of the tuple could leave the other timeframe behind.
+        let mut s = CandleStore::new(1);
+        s.warm(&btc(), Timeframe::H1, vec![candle(0)]);
+        s.warm(&btc(), Timeframe::H4, vec![candle(0)]);
+        s.retain_symbols(&HashSet::new());
+        assert_eq!(s.last_open_ms(&btc(), Timeframe::H1), None);
+        assert_eq!(s.last_open_ms(&btc(), Timeframe::H4), None);
+    }
+
+    #[test]
+    fn pruning_returns_the_count_of_streams_actually_removed() {
+        let mut s = CandleStore::new(1);
+        s.warm(&btc(), Timeframe::H1, vec![candle(0)]);
+        s.warm(&btc(), Timeframe::H4, vec![candle(0)]);
+        s.warm(&Symbol::new("ETHUSDT"), Timeframe::H1, vec![candle(0)]);
+        let mut keep = HashSet::new();
+        keep.insert(Symbol::new("ETHUSDT"));
+        assert_eq!(s.retain_symbols(&keep), 2);
+    }
+
+    #[test]
+    fn pruning_with_an_empty_keep_set_removes_everything() {
+        let mut s = CandleStore::new(1);
+        s.warm(&btc(), Timeframe::H1, vec![candle(0)]);
+        s.warm(&Symbol::new("ETHUSDT"), Timeframe::H4, vec![candle(0)]);
+        assert_eq!(s.retain_symbols(&HashSet::new()), 2);
+    }
+
+    #[test]
+    fn pruning_a_store_with_nothing_to_remove_returns_zero_and_changes_nothing() {
+        let mut s = CandleStore::new(1);
+        s.warm(&btc(), Timeframe::H1, vec![candle(0)]);
+        let mut keep = HashSet::new();
+        keep.insert(btc());
+        assert_eq!(s.retain_symbols(&keep), 0);
+        assert_eq!(s.last_open_ms(&btc(), Timeframe::H1), Some(0));
     }
 }
