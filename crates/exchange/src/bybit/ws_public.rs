@@ -1,4 +1,4 @@
-use botcore::{Candle, Symbol, Timeframe};
+use botcore::{Candle, ErrorClass, Symbol, Timeframe};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -194,6 +194,21 @@ impl MarketFeed for BybitPublicFeed {
                     Ok(()) => {
                         info!("public feed session ended cleanly; reconnecting");
                         attempt = 0;
+                    }
+                    Err(e) if e.class() == ErrorClass::Fatal => {
+                        // rest.klines signs every request, including this
+                        // nominally-public gap backfill, so a revoked or
+                        // expired API key or an IP mismatch surfaces here as
+                        // Fatal — none of which resolve without a human.
+                        // Retrying forever at `warn!` would be
+                        // indistinguishable from ordinary network flakiness
+                        // in the logs, so end the task instead. That drops
+                        // `tx`, so every broadcast::Receiver a caller holds
+                        // starts seeing RecvError::Closed — an unambiguous
+                        // halt signal. Mirrors ws_private.rs's Fatal arm
+                        // deliberately.
+                        error!(error = %e, "public feed hit a fatal error; ending the feed task");
+                        break;
                     }
                     Err(e) => {
                         warn!(error = %e, attempt, "public feed session failed");

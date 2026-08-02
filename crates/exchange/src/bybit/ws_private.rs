@@ -92,49 +92,6 @@ pub fn is_auth_rejected(value: &Value) -> bool {
         && value.get("success").and_then(|v| v.as_bool()) == Some(false)
 }
 
-#[cfg(test)]
-mod parsing_tests {
-    use super::*;
-
-    #[test]
-    fn rejected_auth_is_detected() {
-        let value: Value = serde_json::from_str(r#"{"op":"auth","success":false}"#).unwrap();
-        assert!(is_auth_rejected(&value));
-    }
-
-    #[test]
-    fn successful_auth_is_not_rejected() {
-        let value: Value = serde_json::from_str(r#"{"op":"auth","success":true}"#).unwrap();
-        assert!(!is_auth_rejected(&value));
-    }
-
-    #[test]
-    fn subscribe_ack_is_not_a_rejected_auth() {
-        let value: Value = serde_json::from_str(r#"{"op":"subscribe","success":true}"#).unwrap();
-        assert!(!is_auth_rejected(&value));
-    }
-
-    #[test]
-    fn a_normal_topic_frame_is_not_a_rejected_auth() {
-        let value: Value = serde_json::from_str(
-            r#"{"topic":"wallet","data":[{"totalEquity":"1","totalAvailableBalance":"1"}]}"#,
-        )
-        .unwrap();
-        assert!(!is_auth_rejected(&value));
-    }
-
-    #[test]
-    fn rejected_auth_is_still_detected_with_incidental_whitespace() {
-        // The check must be structural, not a substring match on the raw
-        // text: a rejected auth serialized with spaces after colons (e.g. by
-        // a different JSON encoder) must still be caught, because it is the
-        // one Fatal condition on this stream.
-        let spaced = "{\n  \"op\": \"auth\",\n  \"success\": false\n}";
-        let value: Value = serde_json::from_str(spaced).unwrap();
-        assert!(is_auth_rejected(&value));
-    }
-}
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -272,5 +229,48 @@ async fn run_private_session(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod parsing_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_auth_is_detected() {
+        let value: Value = serde_json::from_str(r#"{"op":"auth","success":false}"#).unwrap();
+        assert!(is_auth_rejected(&value));
+    }
+
+    #[test]
+    fn successful_auth_is_not_rejected() {
+        let value: Value = serde_json::from_str(r#"{"op":"auth","success":true}"#).unwrap();
+        assert!(!is_auth_rejected(&value));
+    }
+
+    #[test]
+    fn subscribe_ack_is_not_a_rejected_auth() {
+        let value: Value = serde_json::from_str(r#"{"op":"subscribe","success":true}"#).unwrap();
+        assert!(!is_auth_rejected(&value));
+    }
+
+    #[test]
+    fn a_normal_topic_frame_is_not_a_rejected_auth() {
+        let value: Value = serde_json::from_str(
+            r#"{"topic":"wallet","data":[{"totalEquity":"1","totalAvailableBalance":"1"}]}"#,
+        )
+        .unwrap();
+        assert!(!is_auth_rejected(&value));
+    }
+
+    #[test]
+    fn rejected_auth_is_still_detected_with_incidental_whitespace() {
+        // The check must be structural, not a substring match on the raw
+        // text: a rejected auth serialized with spaces after colons (e.g. by
+        // a different JSON encoder) must still be caught, because it is the
+        // one Fatal condition on this stream.
+        let spaced = "{\n  \"op\": \"auth\",\n  \"success\": false\n}";
+        let value: Value = serde_json::from_str(spaced).unwrap();
+        assert!(is_auth_rejected(&value));
     }
 }
