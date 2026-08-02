@@ -1,0 +1,15 @@
+[package]
+name = "risk"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+botcore = { path = "../botcore" }
+strategy = { path = "../strategy" }
+rust_decimal.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+proptest = "1"

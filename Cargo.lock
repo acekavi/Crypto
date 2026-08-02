@@ -2478,6 +2478,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "risk"
+version = "0.1.0"
+dependencies = [
+ "botcore",
+ "proptest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "strategy",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "rkyv"
 version = "0.7.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2955,6 +2967,7 @@ dependencies = [
  "indicators",
  "rust_decimal",
  "rust_decimal_macros",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
