@@ -118,7 +118,6 @@ fn drive_long_setup(dip_depth: Decimal, final_close_bump: Decimal) -> Option<str
 
     // 1h: 300 candles drifting up, then a dip that pulls RSI below 40 and
     // brings price back to the EMA, then a recovery candle.
-    let mut last = None;
     for i in 0..300i64 {
         let px = Decimal::from(1000 + i / 3);
         let c = candle(i * 3_600_000, px + dec!(2), px - dec!(2), px);
@@ -128,7 +127,7 @@ fn drive_long_setup(dip_depth: Decimal, final_close_bump: Decimal) -> Option<str
             candle: &c,
             instrument: &inst,
         };
-        last = strat.on_candle_close(&ctx);
+        strat.on_candle_close(&ctx);
     }
 
     // Dip: several down candles push RSI below 40 and price down to the EMA.
@@ -142,7 +141,7 @@ fn drive_long_setup(dip_depth: Decimal, final_close_bump: Decimal) -> Option<str
             candle: &c,
             instrument: &inst,
         };
-        last = strat.on_candle_close(&ctx);
+        strat.on_candle_close(&ctx);
     }
 
     // Recovery candle: closes up, pulling RSI back through 40.
@@ -154,8 +153,7 @@ fn drive_long_setup(dip_depth: Decimal, final_close_bump: Decimal) -> Option<str
         candle: &c,
         instrument: &inst,
     };
-    last = strat.on_candle_close(&ctx);
-    last
+    strat.on_candle_close(&ctx)
 }
 
 #[test]
@@ -253,5 +251,184 @@ fn per_symbol_state_is_isolated() {
         strat.on_candle_close(&ctx),
         None,
         "ETHUSDT fired on BTCUSDT's warm state"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Engineered firing setups.
+//
+// The `drive_long_setup` helper above deliberately does not fire — its RSI only
+// recovers to ~37.9, short of the 40 trigger — and it was left that way rather
+// than tuned until it passed. The two tests below instead construct series
+// built to satisfy every gate, so the happy path is genuinely exercised:
+// a signal MUST be produced, and its geometry is asserted concretely.
+//
+// The values were derived by instrumenting the indicators directly. With a
+// 2-wide candle range the ATR settles at 2.0, so the pullback gate admits a
+// candle whose extreme lands within 1.0 of EMA20. A 14-candle drift against the
+// trend walks RSI to ~36 (long case) or ~63 (short case) — just past the
+// trigger — and the reversal candle both crosses RSI back through it and puts
+// its extreme on the EMA, satisfying the pullback and trigger together. That
+// is what a bounce off the EMA looks like, which is the setup being modelled.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_engineered_long_setup_fires_with_coherent_geometry() {
+    let mut strat = PullbackStrategy::new(StrategyParams::defaults());
+    let symbol = Symbol::new("BTCUSDT");
+    let inst = instrument();
+
+    // 4h uptrend establishes long bias (EMA50 > EMA200).
+    for k in 0..260i64 {
+        let px = Decimal::from(100) + Decimal::new(k * 5, 1);
+        let c = candle(k * 14_400_000, px + dec!(1), px - dec!(1), px);
+        strat.on_candle_close(&MarketContext {
+            symbol: &symbol,
+            timeframe: Timeframe::H4,
+            candle: &c,
+            instrument: &inst,
+        });
+    }
+
+    // 1h uptrend warms EMA20, RSI14 and ATR14 and keeps ATR/close near 0.9%,
+    // comfortably inside the [0.3%, 5.0%] volatility band.
+    let mut px = Decimal::from(100);
+    let mut t = 0i64;
+    for _ in 0..260 {
+        let c = candle(t, px + dec!(1), px - dec!(1), px);
+        strat.on_candle_close(&MarketContext {
+            symbol: &symbol,
+            timeframe: Timeframe::H1,
+            candle: &c,
+            instrument: &inst,
+        });
+        px += dec!(0.5);
+        t += 3_600_000;
+    }
+
+    // 14 down candles walk RSI to ~36.4 — below the 40 trigger, so the next
+    // up-move can cross it.
+    for _ in 0..14 {
+        px -= dec!(0.5);
+        let c = candle(t, px + dec!(1), px - dec!(1), px);
+        strat.on_candle_close(&MarketContext {
+            symbol: &symbol,
+            timeframe: Timeframe::H1,
+            candle: &c,
+            instrument: &inst,
+        });
+        t += 3_600_000;
+    }
+
+    // Reversal: closes 5 higher (crossing RSI back above 40) while its low
+    // dips onto EMA20 (~225.3), satisfying the pullback gate.
+    let close = px + dec!(5);
+    let c = candle(t, close + dec!(1), dec!(225.3), close);
+    let sig = strat
+        .on_candle_close(&MarketContext {
+            symbol: &symbol,
+            timeframe: Timeframe::H1,
+            candle: &c,
+            instrument: &inst,
+        })
+        .expect("engineered long setup must fire");
+
+    assert_eq!(sig.side, Side::Buy);
+    assert!(
+        sig.stop_price < sig.entry_price,
+        "long stop {} must sit below entry {}",
+        sig.stop_price,
+        sig.entry_price
+    );
+    assert!(
+        sig.target_price > sig.entry_price,
+        "long target {} must sit above entry {}",
+        sig.target_price,
+        sig.entry_price
+    );
+    assert_eq!(
+        sig.reward_multiple(),
+        Some(dec!(2)),
+        "target must sit at exactly 2R"
+    );
+    assert!(sig.atr > Decimal::ZERO, "signal must carry a positive ATR");
+    assert_eq!(sig.symbol.as_str(), "BTCUSDT");
+}
+
+#[test]
+fn an_engineered_short_setup_fires_with_mirrored_geometry() {
+    let mut strat = PullbackStrategy::new(StrategyParams::defaults());
+    let symbol = Symbol::new("BTCUSDT");
+    let inst = instrument();
+
+    // 4h downtrend establishes short bias (EMA50 < EMA200).
+    for k in 0..260i64 {
+        let px = Decimal::from(500) - Decimal::new(k * 5, 1);
+        let c = candle(k * 14_400_000, px + dec!(1), px - dec!(1), px);
+        strat.on_candle_close(&MarketContext {
+            symbol: &symbol,
+            timeframe: Timeframe::H4,
+            candle: &c,
+            instrument: &inst,
+        });
+    }
+
+    let mut px = Decimal::from(500);
+    let mut t = 0i64;
+    for _ in 0..260 {
+        let c = candle(t, px + dec!(1), px - dec!(1), px);
+        strat.on_candle_close(&MarketContext {
+            symbol: &symbol,
+            timeframe: Timeframe::H1,
+            candle: &c,
+            instrument: &inst,
+        });
+        px -= dec!(0.5);
+        t += 3_600_000;
+    }
+
+    // 14 up candles walk RSI above the 60 short trigger.
+    for _ in 0..14 {
+        px += dec!(0.5);
+        let c = candle(t, px + dec!(1), px - dec!(1), px);
+        strat.on_candle_close(&MarketContext {
+            symbol: &symbol,
+            timeframe: Timeframe::H1,
+            candle: &c,
+            instrument: &inst,
+        });
+        t += 3_600_000;
+    }
+
+    // Reversal: closes 4 lower (crossing RSI back below 60) while its high
+    // reaches up to EMA20 (~374.7).
+    let close = px - dec!(4);
+    let c = candle(t, dec!(374.7), close - dec!(1), close);
+    let sig = strat
+        .on_candle_close(&MarketContext {
+            symbol: &symbol,
+            timeframe: Timeframe::H1,
+            candle: &c,
+            instrument: &inst,
+        })
+        .expect("engineered short setup must fire");
+
+    assert_eq!(sig.side, Side::Sell);
+    assert!(
+        sig.stop_price > sig.entry_price,
+        "short stop {} must sit above entry {}",
+        sig.stop_price,
+        sig.entry_price
+    );
+    assert!(
+        sig.target_price < sig.entry_price,
+        "short target {} must sit below entry {}",
+        sig.target_price,
+        sig.entry_price
+    );
+    assert_eq!(
+        sig.reward_multiple(),
+        Some(dec!(2)),
+        "target must sit at exactly 2R"
     );
 }

@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use botcore::{Candle, Side, Symbol, Timeframe};
 use indicators::{Atr, Ema, Rsi};
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 
 use crate::signal::{MarketContext, Signal};
 use crate::traits::Strategy;
@@ -38,16 +37,16 @@ impl StrategyParams {
             ema_slow: 200,
             ema_entry: 20,
             rsi_period: 14,
-            rsi_long_trigger: dec!(40),
-            rsi_short_trigger: dec!(60),
+            rsi_long_trigger: Decimal::from(40),
+            rsi_short_trigger: Decimal::from(60),
             atr_period: 14,
-            atr_band_min_pct: dec!(0.003),
-            atr_band_max_pct: dec!(0.05),
+            atr_band_min_pct: Decimal::new(3, 3),
+            atr_band_max_pct: Decimal::new(5, 2),
             swing_lookback: 10,
-            atr_stop_multiple: dec!(1.5),
-            reward_multiple: dec!(2),
+            atr_stop_multiple: Decimal::new(15, 1),
+            reward_multiple: Decimal::from(2),
             pullback_lookback: 5,
-            pullback_atr_fraction: dec!(0.5),
+            pullback_atr_fraction: Decimal::new(5, 1),
         }
     }
 }
