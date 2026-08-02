@@ -108,20 +108,12 @@ pub fn check_entry_allowed(
 /// the all-time high-water mark. A non-positive baseline yields `None` rather
 /// than dividing by zero — an account with no recorded baseline has no
 /// measurable drawdown.
+///
+/// We check total drawdown before daily: when both breach, the more severe
+/// condition (structural, multi-session degradation from peak) is reported
+/// because that reason string is what a human reads when deciding whether
+/// clearing the halt is safe.
 pub fn drawdown_breach(state: &AccountState, params: &RiskParams) -> Option<Refusal> {
-    if state.day_start_equity > Decimal::ZERO {
-        let fall = state.day_start_equity - state.equity;
-        if fall > Decimal::ZERO {
-            let pct = fall / state.day_start_equity;
-            if pct >= params.daily_drawdown_halt_pct {
-                return Some(Refusal::DailyDrawdown {
-                    pct,
-                    limit: params.daily_drawdown_halt_pct,
-                });
-            }
-        }
-    }
-
     if state.high_water_mark > Decimal::ZERO {
         let fall = state.high_water_mark - state.equity;
         if fall > Decimal::ZERO {
@@ -130,6 +122,19 @@ pub fn drawdown_breach(state: &AccountState, params: &RiskParams) -> Option<Refu
                 return Some(Refusal::TotalDrawdown {
                     pct,
                     limit: params.total_drawdown_halt_pct,
+                });
+            }
+        }
+    }
+
+    if state.day_start_equity > Decimal::ZERO {
+        let fall = state.day_start_equity - state.equity;
+        if fall > Decimal::ZERO {
+            let pct = fall / state.day_start_equity;
+            if pct >= params.daily_drawdown_halt_pct {
+                return Some(Refusal::DailyDrawdown {
+                    pct,
+                    limit: params.daily_drawdown_halt_pct,
                 });
             }
         }
@@ -260,5 +265,21 @@ mod tests {
         s.equity = dec!(0);
         // No baseline means no measurable drawdown, not a panic.
         assert_eq!(drawdown_breach(&s, &p), None);
+    }
+
+    #[test]
+    fn a_simultaneous_breach_reports_the_more_severe_total_drawdown() {
+        // Down 6% on the day AND 20.1% from the all-time peak. The human clearing
+        // this halt must see the structural problem, not the daily one.
+        let p = RiskParams::defaults();
+        let mut s = healthy();
+        s.high_water_mark = dec!(20000);
+        s.day_start_equity = dec!(17000);
+        s.equity = dec!(15980);
+        let b = drawdown_breach(&s, &p).expect("both thresholds breached");
+        assert!(
+            matches!(b, Refusal::TotalDrawdown { .. }),
+            "expected TotalDrawdown when both breach, got {b:?}"
+        );
     }
 }
