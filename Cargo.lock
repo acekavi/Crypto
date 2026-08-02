@@ -796,10 +796,7 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "sha2",
- "strategy",
- "thiserror 2.0.19",
  "tokio",
- "tracing",
 ]
 
 [[package]]
