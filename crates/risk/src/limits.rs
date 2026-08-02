@@ -56,7 +56,10 @@ pub enum Refusal {
     BelowMinimumQty { notional: Decimal, minimum: Decimal },
 
     #[error("order notional {notional} exceeds available margin {available}")]
-    InsufficientMargin { notional: Decimal, available: Decimal },
+    InsufficientMargin {
+        notional: Decimal,
+        available: Decimal,
+    },
 
     #[error(
         "computed stop-limit price {price} is not positive; ATR {atr} is too large relative to the stop"

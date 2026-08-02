@@ -3,7 +3,7 @@ pub mod pullback;
 pub mod signal;
 pub mod traits;
 
+pub use params_from_config::{ParamError, params_from_f64_config};
 pub use pullback::PullbackStrategy;
-pub use params_from_config::{params_from_f64_config, ParamError};
 pub use signal::{MarketContext, Signal};
 pub use traits::Strategy;

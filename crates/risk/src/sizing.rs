@@ -20,10 +20,10 @@ impl RiskParams {
     /// The spec's envelope.
     pub fn defaults() -> Self {
         RiskParams {
-            risk_pct: Decimal::new(1, 2),              // 0.01
+            risk_pct: Decimal::new(1, 2), // 0.01
             max_concurrent_positions: 4,
             max_daily_entries: 5,
-            daily_drawdown_halt_pct: Decimal::new(5, 2),  // 0.05
+            daily_drawdown_halt_pct: Decimal::new(5, 2), // 0.05
             total_drawdown_halt_pct: Decimal::new(15, 2), // 0.15
             liq_buffer_multiple: Decimal::from(3),
         }
@@ -115,49 +115,86 @@ mod tests {
 
     #[test]
     fn zero_stop_distance_yields_none_rather_than_dividing_by_zero() {
-        assert_eq!(position_size(dec!(10000), dec!(0.01), dec!(0), dec!(0.001)), None);
+        assert_eq!(
+            position_size(dec!(10000), dec!(0.01), dec!(0), dec!(0.001)),
+            None
+        );
     }
 
     #[test]
     fn non_positive_equity_yields_none() {
         // A zero-equity account (an unfunded testnet account, for instance)
         // must produce no position rather than a zero-size order.
-        assert_eq!(position_size(dec!(0), dec!(0.01), dec!(5), dec!(0.001)), None);
-        assert_eq!(position_size(dec!(-100), dec!(0.01), dec!(5), dec!(0.001)), None);
+        assert_eq!(
+            position_size(dec!(0), dec!(0.01), dec!(5), dec!(0.001)),
+            None
+        );
+        assert_eq!(
+            position_size(dec!(-100), dec!(0.01), dec!(5), dec!(0.001)),
+            None
+        );
     }
 
     #[test]
     fn a_size_rounding_to_zero_yields_none() {
         // Tiny equity against a wide stop and a coarse step rounds to nothing;
         // that must be None, not an order for zero units.
-        assert_eq!(position_size(dec!(10), dec!(0.01), dec!(5000), dec!(1)), None);
+        assert_eq!(
+            position_size(dec!(10), dec!(0.01), dec!(5000), dec!(1)),
+            None
+        );
     }
 
     #[test]
     fn liquidation_far_beyond_the_stop_is_safe() {
         // Long at 100, stop at 95 (distance 5), buffer 3 => liquidation must
         // be at or below 85. At 80 it is comfortably clear.
-        assert!(liquidation_is_safe(dec!(100), dec!(95), Some(dec!(80)), dec!(3)));
+        assert!(liquidation_is_safe(
+            dec!(100),
+            dec!(95),
+            Some(dec!(80)),
+            dec!(3)
+        ));
     }
 
     #[test]
     fn liquidation_inside_the_buffer_is_unsafe() {
         // Liquidation at 90 is only 2 stop-distances away, inside the 3x rule.
-        assert!(!liquidation_is_safe(dec!(100), dec!(95), Some(dec!(90)), dec!(3)));
+        assert!(!liquidation_is_safe(
+            dec!(100),
+            dec!(95),
+            Some(dec!(90)),
+            dec!(3)
+        ));
     }
 
     #[test]
     fn liquidation_between_entry_and_stop_is_unsafe() {
         // The exchange would close the position before the stop ever triggers.
-        assert!(!liquidation_is_safe(dec!(100), dec!(95), Some(dec!(97)), dec!(3)));
+        assert!(!liquidation_is_safe(
+            dec!(100),
+            dec!(95),
+            Some(dec!(97)),
+            dec!(3)
+        ));
     }
 
     #[test]
     fn short_side_buffer_is_measured_upward() {
         // Short at 100, stop at 105 (distance 5), buffer 3 => liquidation must
         // be at or above 115.
-        assert!(liquidation_is_safe(dec!(100), dec!(105), Some(dec!(120)), dec!(3)));
-        assert!(!liquidation_is_safe(dec!(100), dec!(105), Some(dec!(110)), dec!(3)));
+        assert!(liquidation_is_safe(
+            dec!(100),
+            dec!(105),
+            Some(dec!(120)),
+            dec!(3)
+        ));
+        assert!(!liquidation_is_safe(
+            dec!(100),
+            dec!(105),
+            Some(dec!(110)),
+            dec!(3)
+        ));
     }
 
     #[test]

@@ -155,7 +155,18 @@ mod tests {
     #[test]
     fn non_finite_f64_is_rejected_rather_than_producing_a_garbage_decimal() {
         let e = params_from_f64_config(
-            50, 200, 20, 14, f64::NAN, 60.0, 14, 0.003, 0.05, 10, 1.5, 2.0,
+            50,
+            200,
+            20,
+            14,
+            f64::NAN,
+            60.0,
+            14,
+            0.003,
+            0.05,
+            10,
+            1.5,
+            2.0,
         )
         .expect_err("NaN must be rejected");
         assert!(matches!(e, ParamError::NotFinite(_)));
