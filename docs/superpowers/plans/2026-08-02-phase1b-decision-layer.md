@@ -981,7 +981,7 @@ erase a pullback. The stop takes the further of the swing extreme and
 
 **Interfaces:**
 - Consumes: `StrategyParams` (Task 2)
-- Produces: `params_from_f64_config(ema_fast, ema_slow, ema_entry, rsi_period, rsi_long_trigger, rsi_short_trigger, atr_period, atr_band_min_pct, atr_band_max_pct, swing_lookback, atr_stop_multiple, reward_multiple, entry_expiry_candles, stop_limit_offset_atr) -> Result<StrategyParams, ParamError>` and `ParamError`
+- Produces: `params_from_f64_config(ema_fast, ema_slow, ema_entry, rsi_period, rsi_long_trigger, rsi_short_trigger, atr_period, atr_band_min_pct, atr_band_max_pct, swing_lookback, atr_stop_multiple, reward_multiple) -> Result<StrategyParams, ParamError>` and `ParamError`
 
 `bot` depends on `strategy`, so `strategy` must NOT depend on `bot`. The conversion therefore takes primitives rather than the config struct.
 
