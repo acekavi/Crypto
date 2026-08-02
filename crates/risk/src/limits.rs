@@ -57,6 +57,16 @@ pub enum Refusal {
 
     #[error("order notional {notional} exceeds available margin {available}")]
     InsufficientMargin { notional: Decimal, available: Decimal },
+
+    #[error(
+        "computed stop-limit price {price} is not positive; ATR {atr} is too large relative to the stop"
+    )]
+    NonPositiveStopLimit { price: Decimal, atr: Decimal },
+
+    #[error(
+        "computed target price {price} is not positive; the {multiple}x reward multiple is too large relative to entry"
+    )]
+    NonPositiveTargetPrice { price: Decimal, multiple: Decimal },
 }
 
 /// Whether a new entry in `symbol` is permitted right now.

@@ -126,17 +126,42 @@ impl RiskManager {
 
         // Target at the strategy's own R multiple, measured from the ROUNDED
         // entry so the realized reward matches what was sized.
-        let reward = stop_distance * reward_multiple_from(signal);
+        let multiple = reward_multiple_from(signal);
+        let reward = stop_distance * multiple;
         let target = match signal.side {
             Side::Buy => entry + reward,
             Side::Sell => entry - reward,
         };
+        // `reward` is independent of price level, so on a short with a large
+        // reward multiple `entry - reward` can fall through zero. Refuse
+        // rather than emit it: `round_down_to_step`'s debug_assert is compiled
+        // out in release builds, so a negative price would instead reach the
+        // exchange and be rejected outright.
+        if target <= Decimal::ZERO {
+            return Decision::Refuse(Refusal::NonPositiveTargetPrice {
+                price: target,
+                multiple,
+            });
+        }
 
+        // `offset` derives from ATR and is independent of the stop distance, so
+        // on a low-priced, highly volatile instrument `stop - offset` can fall
+        // through zero. Refuse rather than emit it: in release builds the
+        // debug_assert in round_down_to_step is compiled out, and a negative
+        // price would be rejected by the exchange — leaving a filled entry with
+        // no working protective order, the one state this manager exists to
+        // prevent.
         let offset = signal.atr * self.stop_limit_offset_atr;
         let stop_limit_price = match signal.side {
             Side::Buy => stop - offset,
             Side::Sell => stop + offset,
         };
+        if stop_limit_price <= Decimal::ZERO {
+            return Decision::Refuse(Refusal::NonPositiveStopLimit {
+                price: stop_limit_price,
+                atr: signal.atr,
+            });
+        }
 
         Decision::Enter(OrderIntent {
             symbol: signal.symbol.clone(),

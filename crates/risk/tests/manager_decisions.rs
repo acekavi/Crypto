@@ -183,3 +183,48 @@ fn entry_and_stop_prices_are_rounded_to_the_instruments_tick() {
         intent.stop_price
     );
 }
+
+#[test]
+fn a_stop_limit_price_falling_through_zero_refuses_rather_than_panicking() {
+    // A cheap instrument whose ATR is huge relative to its price: entry 1.0,
+    // stop 0.5, ATR 3.0 -> offset 0.9, so stop - offset = -0.4.
+    let mut sig = long_signal();
+    sig.entry_price = dec!(1.0);
+    sig.stop_price = dec!(0.5);
+    sig.target_price = dec!(2.0);
+    sig.atr = dec!(3);
+
+    let mut inst = instrument();
+    inst.tick_size = dec!(0.0001);
+    inst.qty_step = dec!(0.001);
+    inst.min_order_qty = dec!(0.001);
+
+    let d = manager().evaluate(&sig, &healthy(), &inst, None);
+    assert!(
+        matches!(d, Decision::Refuse(Refusal::NonPositiveStopLimit { .. })),
+        "expected a refusal, got {d:?}"
+    );
+}
+
+#[test]
+fn a_short_target_price_falling_through_zero_refuses_rather_than_panicking() {
+    // Short entry 1.0, stop 1.5 (distance 0.5); a signal target of -0.5 implies
+    // a 3x reward multiple, so target = entry - reward = 1.0 - 1.5 = -0.5.
+    let mut sig = long_signal();
+    sig.side = Side::Sell;
+    sig.entry_price = dec!(1.0);
+    sig.stop_price = dec!(1.5);
+    sig.target_price = dec!(-0.5);
+    sig.atr = dec!(2);
+
+    let mut inst = instrument();
+    inst.tick_size = dec!(0.0001);
+    inst.qty_step = dec!(0.001);
+    inst.min_order_qty = dec!(0.001);
+
+    let d = manager().evaluate(&sig, &healthy(), &inst, None);
+    assert!(
+        matches!(d, Decision::Refuse(Refusal::NonPositiveTargetPrice { .. })),
+        "expected a refusal, got {d:?}"
+    );
+}
