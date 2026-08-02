@@ -1,0 +1,22 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+botcore = { path = "../botcore" }
+exchange = { path = "../exchange" }
+risk = { path = "../risk" }
+strategy = { path = "../strategy" }
+async-trait = "0.1"
+rust_decimal.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+proptest = "1"

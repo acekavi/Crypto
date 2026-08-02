@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/botcore", "crates/indicators", "crates/exchange", "crates/persistence", "crates/strategy", "crates/risk", "bot"]
+members = ["crates/botcore", "crates/indicators", "crates/exchange", "crates/persistence", "crates/strategy", "crates/risk", "crates/engine", "bot"]
 resolver = "3"
 
 [workspace.package]
