@@ -8,6 +8,7 @@ rust-version.workspace = true
 botcore = { path = "../botcore" }
 indicators = { path = "../indicators" }
 rust_decimal.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
