@@ -48,14 +48,27 @@ mod tests {
     #[test]
     fn every_input_changes_the_id() {
         let base = order_link_id(&Symbol::new("BTCUSDT"), 1_700_000_000_000, Side::Buy);
-        assert_ne!(base, order_link_id(&Symbol::new("ETHUSDT"), 1_700_000_000_000, Side::Buy));
-        assert_ne!(base, order_link_id(&Symbol::new("BTCUSDT"), 1_700_000_003_600, Side::Buy));
-        assert_ne!(base, order_link_id(&Symbol::new("BTCUSDT"), 1_700_000_000_000, Side::Sell));
+        assert_ne!(
+            base,
+            order_link_id(&Symbol::new("ETHUSDT"), 1_700_000_000_000, Side::Buy)
+        );
+        assert_ne!(
+            base,
+            order_link_id(&Symbol::new("BTCUSDT"), 1_700_000_003_600, Side::Buy)
+        );
+        assert_ne!(
+            base,
+            order_link_id(&Symbol::new("BTCUSDT"), 1_700_000_000_000, Side::Sell)
+        );
     }
 
     #[test]
     fn the_id_fits_bybits_thirty_six_character_limit() {
-        let id = order_link_id(&Symbol::new("SOMEVERYLONGSYMBOLNAMEUSDT"), i64::MAX, Side::Sell);
+        let id = order_link_id(
+            &Symbol::new("SOMEVERYLONGSYMBOLNAMEUSDT"),
+            i64::MAX,
+            Side::Sell,
+        );
         assert!(id.len() <= 36, "id was {} chars: {id}", id.len());
         assert!(!id.is_empty());
     }
@@ -75,7 +88,11 @@ mod tests {
     fn adjacent_candles_do_not_collide() {
         // Consecutive 1h candles are one hour apart; their ids must differ.
         let a = order_link_id(&Symbol::new("BTCUSDT"), 1_700_000_000_000, Side::Buy);
-        let b = order_link_id(&Symbol::new("BTCUSDT"), 1_700_000_000_000 + 3_600_000, Side::Buy);
+        let b = order_link_id(
+            &Symbol::new("BTCUSDT"),
+            1_700_000_000_000 + 3_600_000,
+            Side::Buy,
+        );
         assert_ne!(a, b);
     }
 }
