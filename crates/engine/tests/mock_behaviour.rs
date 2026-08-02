@@ -122,3 +122,28 @@ async fn the_mock_is_shareable_across_tasks() {
     .expect("task joined");
     assert_eq!(m.placed_orders().len(), 1);
 }
+
+#[tokio::test]
+async fn an_injected_fatal_error_stays_fatal() {
+    // The execution layer branches on ErrorClass. If injection downgraded a
+    // Fatal to Rejected, a halt-on-Fatal test would silently exercise the
+    // skip-and-continue path and still pass.
+    use botcore::ErrorClass;
+    let m = MockExchange::new().fail_place_entry_always(ExchangeError::RetriesExhausted {
+        attempts: 3,
+        last: Box::new(ExchangeError::Api {
+            code: 10003,
+            msg: "invalid api key".into(),
+        }),
+    });
+    let err = m
+        .place_limit_entry(entry("a"))
+        .await
+        .expect_err("must fail");
+    assert_eq!(
+        err.class(),
+        ErrorClass::Fatal,
+        "injected Fatal arrived as {:?}",
+        err.class()
+    );
+}

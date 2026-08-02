@@ -235,6 +235,11 @@ impl ExchangeClient for MockExchange {
 
 /// `ExchangeError` is not `Clone` (its `Http` variant wraps a `reqwest::Error`),
 /// so injected failures are reproduced by variant rather than cloned.
+///
+/// Every arm preserves the ORIGINAL's `ErrorClass`. That matters more than the
+/// exact variant: the execution layer branches on class, so an injected Fatal
+/// arriving as Rejected would make a halt-on-Fatal test silently exercise the
+/// skip-and-continue path instead, and still pass.
 fn clone_error(e: &ExchangeError) -> ExchangeError {
     match e {
         ExchangeError::Api { code, msg } => ExchangeError::Api {
@@ -243,6 +248,16 @@ fn clone_error(e: &ExchangeError) -> ExchangeError {
         },
         ExchangeError::Decode(m) => ExchangeError::Decode(m.clone()),
         ExchangeError::WebSocket(m) => ExchangeError::WebSocket(m.clone()),
-        other => ExchangeError::Decode(format!("injected: {other}")),
+        // A reqwest::Error cannot be constructed here. WebSocket carries the
+        // same Retryable class, so substitute it rather than falling through to
+        // Decode, which would downgrade Retryable to Rejected.
+        ExchangeError::Http(inner) => {
+            ExchangeError::WebSocket(format!("injected transport error: {inner}"))
+        }
+        // Recurse so the wrapped error's class — which may be Fatal — survives.
+        ExchangeError::RetriesExhausted { attempts, last } => ExchangeError::RetriesExhausted {
+            attempts: *attempts,
+            last: Box::new(clone_error(last)),
+        },
     }
 }
