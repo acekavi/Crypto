@@ -20,11 +20,7 @@ impl EscalationLadder {
     /// The spec's ladder: 0.3, 0.6, then 1.2 ATR, 30 seconds per rung.
     pub fn defaults() -> Self {
         EscalationLadder {
-            offsets_atr: vec![
-                Decimal::new(3, 1),
-                Decimal::new(6, 1),
-                Decimal::new(12, 1),
-            ],
+            offsets_atr: vec![Decimal::new(3, 1), Decimal::new(6, 1), Decimal::new(12, 1)],
             timeout_ms: 30_000,
         }
     }
@@ -62,12 +58,7 @@ pub enum EscalationAction {
 /// closes by selling, so its limit goes below; a short closes by buying, so
 /// its limit goes above. Sitting beyond the trigger is what lets it fill into
 /// the move rather than at its edge.
-pub fn stop_limit_for(
-    trigger: Decimal,
-    atr: Decimal,
-    side: Side,
-    offset_atr: Decimal,
-) -> Decimal {
+pub fn stop_limit_for(trigger: Decimal, atr: Decimal, side: Side, offset_atr: Decimal) -> Decimal {
     let offset = atr * offset_atr;
     match side {
         Side::Buy => trigger - offset,
@@ -144,14 +135,20 @@ mod tests {
     fn a_wider_rung_sits_further_from_the_trigger() {
         let near = stop_limit_for(dec!(100), dec!(2), Side::Buy, dec!(0.3));
         let far = stop_limit_for(dec!(100), dec!(2), Side::Buy, dec!(1.2));
-        assert!(far < near, "rung 2 ({far}) was not further out than rung 0 ({near})");
+        assert!(
+            far < near,
+            "rung 2 ({far}) was not further out than rung 0 ({near})"
+        );
     }
 
     #[test]
     fn before_the_timeout_the_action_is_to_wait() {
         let l = EscalationLadder::defaults();
         let s = stop(0, 1_000_000, Side::Buy);
-        assert_eq!(next_escalation(&s, &l, 1_000_000 + 29_999), EscalationAction::Wait);
+        assert_eq!(
+            next_escalation(&s, &l, 1_000_000 + 29_999),
+            EscalationAction::Wait
+        );
     }
 
     #[test]

@@ -103,7 +103,10 @@ mod tests {
 
     #[test]
     fn the_high_water_mark_rises_with_a_new_peak() {
-        assert_eq!(update_high_water_mark(dec!(10000), dec!(11000)), dec!(11000));
+        assert_eq!(
+            update_high_water_mark(dec!(10000), dec!(11000)),
+            dec!(11000)
+        );
     }
 
     #[test]
@@ -111,7 +114,10 @@ mod tests {
         // If it tracked equity downward, the total-drawdown halt could never
         // fire — the baseline would keep retreating to meet the loss.
         assert_eq!(update_high_water_mark(dec!(12000), dec!(9000)), dec!(12000));
-        assert_eq!(update_high_water_mark(dec!(12000), dec!(12000)), dec!(12000));
+        assert_eq!(
+            update_high_water_mark(dec!(12000), dec!(12000)),
+            dec!(12000)
+        );
     }
 
     #[test]

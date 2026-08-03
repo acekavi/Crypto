@@ -108,11 +108,13 @@ impl OrderTracker {
         expired
             .into_iter()
             .filter_map(|link_id| {
-                self.resting.remove(&link_id).map(|o| TrackerAction::Expire {
-                    link_id,
-                    symbol: o.symbol,
-                    filled: o.cum_exec_qty,
-                })
+                self.resting
+                    .remove(&link_id)
+                    .map(|o| TrackerAction::Expire {
+                        link_id,
+                        symbol: o.symbol,
+                        filled: o.cum_exec_qty,
+                    })
             })
             .collect()
     }
@@ -188,7 +190,10 @@ mod tests {
                 filled: dec!(0),
             }]
         );
-        assert!(!t.is_resting("a"), "an expired order must stop being tracked");
+        assert!(
+            !t.is_resting("a"),
+            "an expired order must stop being tracked"
+        );
     }
 
     #[test]

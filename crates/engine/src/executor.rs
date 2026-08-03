@@ -25,7 +25,11 @@ pub struct Executor {
 }
 
 impl Executor {
-    pub fn new(client: Arc<dyn ExchangeClient>, journal: Arc<Journal>, config_hash: String) -> Self {
+    pub fn new(
+        client: Arc<dyn ExchangeClient>,
+        journal: Arc<Journal>,
+        config_hash: String,
+    ) -> Self {
         Executor {
             client,
             journal,

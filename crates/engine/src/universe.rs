@@ -41,10 +41,8 @@ pub fn select_universe(
     now_ms: i64,
     protected: &HashSet<Symbol>,
 ) -> Vec<Symbol> {
-    let by_symbol: HashMap<&str, &Instrument> = instruments
-        .iter()
-        .map(|i| (i.symbol.as_str(), i))
-        .collect();
+    let by_symbol: HashMap<&str, &Instrument> =
+        instruments.iter().map(|i| (i.symbol.as_str(), i)).collect();
 
     let mut qualified: Vec<&Ticker> = tickers
         .iter()
@@ -229,7 +227,10 @@ mod tests {
 
         let out = select_universe(&tickers, &instruments, &f, NOW, &protected);
         let names: Vec<_> = out.iter().map(|s| s.as_str()).collect();
-        assert!(names.contains(&"HELDUSDT"), "protected symbol was dropped: {names:?}");
+        assert!(
+            names.contains(&"HELDUSDT"),
+            "protected symbol was dropped: {names:?}"
+        );
         assert!(names.contains(&"DEEPUSDT"));
     }
 

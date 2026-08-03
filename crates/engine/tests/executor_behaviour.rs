@@ -108,7 +108,11 @@ async fn a_retry_after_a_transient_failure_reuses_the_id_and_places_once() {
 
     let second = ex.place_entry(&intent()).await.expect("retry succeeds");
 
-    assert_eq!(mock.place_entry_call_count(), 2, "both attempts should reach the client");
+    assert_eq!(
+        mock.place_entry_call_count(),
+        2,
+        "both attempts should reach the client"
+    );
     assert_eq!(mock.placed_orders().len(), 1, "only one order was accepted");
     assert_eq!(mock.placed_orders()[0].order_link_id, second.link_id);
 }
@@ -119,7 +123,9 @@ async fn cancel_and_widen_reach_the_exchange() {
     let mock = Arc::new(MockExchange::new());
     let ex = Executor::new(mock.clone(), j, "hash".into());
 
-    ex.cancel(&Symbol::new("BTCUSDT"), "abc").await.expect("cancelled");
+    ex.cancel(&Symbol::new("BTCUSDT"), "abc")
+        .await
+        .expect("cancelled");
     ex.widen_stop(&Symbol::new("BTCUSDT"), dec!(41000), dec!(40500))
         .await
         .expect("widened");
