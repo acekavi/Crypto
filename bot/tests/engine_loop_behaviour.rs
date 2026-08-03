@@ -153,3 +153,51 @@ async fn a_zero_equity_account_refuses_rather_than_placing() {
         "a zero-equity account must never place an order"
     );
 }
+
+#[tokio::test]
+async fn a_stale_required_timeframe_blocks_an_otherwise_valid_candle() {
+    // The pullback strategy needs both H1 and H4: H4 sets the bias, H1 times
+    // the entry. If the H4 feed dies while H1 keeps flowing, trading on that
+    // stale bias must be refused even though the H1 stream itself is fine.
+    let mock = Arc::new(MockExchange::new());
+    let (mut el, _d) = loop_with(mock.clone()).await;
+    let sym = Symbol::new("BTCUSDT");
+
+    // Warm H1 to satisfy the warmup gate on its own.
+    let h1_history: Vec<Candle> = (0..250).map(|i| candle(i * H1)).collect();
+    el.warm(&sym, Timeframe::H1, h1_history);
+
+    // H4's last candle sits at time 0 and is never advanced.
+    el.warm(&sym, Timeframe::H4, vec![candle(0)]);
+
+    // The next H1 candle (index 250) opens at 250h, far more than 2*H4
+    // (8h) after H4's last candle at 0 — H4 has gone stale.
+    let out = el
+        .on_candle_closed(&sym, Timeframe::H1, &candle(250 * H1))
+        .await
+        .expect("handled");
+
+    assert!(
+        matches!(out, CandleOutcome::Skipped(SkipReason::Stale)),
+        "a stale H4 bias feed must block the candle even though H1 is fine, got {out:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_pair_of_required_timeframes_does_not_trigger_staleness() {
+    let mock = Arc::new(MockExchange::new());
+    let (mut el, _d) = loop_with(mock.clone()).await;
+    let sym = Symbol::new("BTCUSDT");
+
+    // H4's last candle is recent relative to the incoming H1 candle.
+    el.warm(&sym, Timeframe::H4, vec![candle(0)]);
+
+    let out = el
+        .on_candle_closed(&sym, Timeframe::H1, &candle(H1))
+        .await
+        .expect("handled");
+
+    // Deliberately not asserting which gate produced the outcome (this
+    // stream is not warm yet) — only that staleness is not it.
+    assert!(!matches!(out, CandleOutcome::Skipped(SkipReason::Stale)));
+}

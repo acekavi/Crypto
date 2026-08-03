@@ -153,8 +153,19 @@ impl EngineLoop {
         if !self.store.is_warm(symbol, tf) {
             return Ok(CandleOutcome::Skipped(SkipReason::NotWarm));
         }
-        if self.store.is_stale(symbol, tf, candle.open_time_ms) {
-            return Ok(CandleOutcome::Skipped(SkipReason::Stale));
+
+        // Staleness must be checked across EVERY timeframe the strategy needs,
+        // not just the one that arrived. A candle for this stream has, by
+        // definition, just arrived, so checking only it can never fire. The
+        // real hazard is a different stream going quiet — if the 4h bias feed
+        // dies while 1h keeps flowing, the bot would trade on an outdated
+        // trend filter and never notice. `to_vec()` sidesteps a simultaneous
+        // borrow of `self.strategy` and `self.store` across the loop.
+        let required_timeframes: Vec<Timeframe> = self.strategy.timeframes().to_vec();
+        for required in required_timeframes {
+            if self.store.is_stale(symbol, required, candle.open_time_ms) {
+                return Ok(CandleOutcome::Skipped(SkipReason::Stale));
+            }
         }
 
         let ctx = MarketContext {
