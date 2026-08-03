@@ -14,9 +14,12 @@ path = "src/lib.rs"
 
 [dependencies]
 botcore = { path = "../crates/botcore" }
+engine = { path = "../crates/engine" }
 exchange = { path = "../crates/exchange" }
 indicators = { path = "../crates/indicators" }
 persistence = { path = "../crates/persistence" }
+risk = { path = "../crates/risk" }
+strategy = { path = "../crates/strategy" }
 rust_decimal.workspace = true
 serde.workspace = true
 sha2 = "0.10"
@@ -29,4 +32,6 @@ tracing-subscriber.workspace = true
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
 [dev-dependencies]
+rust_decimal_macros.workspace = true
 temp-env = "0.3"
+tempfile = "3"
