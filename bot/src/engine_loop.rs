@@ -97,6 +97,17 @@ impl EngineLoop {
         self.tracker.track(order);
     }
 
+    /// Direct access to the order tracker.
+    ///
+    /// `engine::reconcile` takes `&mut OrderTracker` and adopts resting
+    /// orders into it directly; exposing the tracker this engine already
+    /// owns lets a restart's reconciliation land straight in the engine's
+    /// own bookkeeping rather than going through a second tracker whose
+    /// contents would then need copying over one by one.
+    pub fn tracker_mut(&mut self) -> &mut OrderTracker {
+        &mut self.tracker
+    }
+
     /// Test-only alias so integration tests can seed a resting order.
     pub fn track_for_test(&mut self, order: RestingOrder) {
         self.track(order);

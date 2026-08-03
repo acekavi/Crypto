@@ -1,15 +1,36 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bot::config::{Config, Profile};
-use botcore::{Symbol, Timeframe};
+use bot::engine_loop::EngineLoop;
+use botcore::{ErrorClass, Symbol, Timeframe};
+use engine::{UniverseFilter, reconcile, select_universe};
 use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
+use exchange::bybit::ws_private::BybitPrivateFeed;
 use exchange::bybit::ws_public::BybitPublicFeed;
 use exchange::{ExchangeClient, MarketEvent, MarketFeed, Subscription};
 use persistence::{Journal, JournalError, spawn_sync_task};
+use risk::{RiskManager, RiskParams};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
+use strategy::{PullbackStrategy, Strategy, params_from_f64_config};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{error, info, warn};
+
+/// Convert a config `f64` knob into a `Decimal`, refusing rather than
+/// silently producing a garbage value if the file ever carries a NaN,
+/// infinity, or a value with no `Decimal` representation. These knobs govern
+/// real risk limits, so a bad conversion must fail loudly at startup rather
+/// than reach `RiskManager` as a wrong number.
+fn config_decimal(value: f64, field: &'static str) -> Result<Decimal, Box<dyn std::error::Error>> {
+    if !value.is_finite() {
+        return Err(format!("config field {field} ({value}) is not a finite number").into());
+    }
+    Decimal::from_f64(value)
+        .ok_or_else(|| format!("config field {field} ({value}) cannot convert to Decimal").into())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,35 +54,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile = Profile::from_name(&profile_name)?;
     let config = Config::load(profile)?;
 
-    info!(profile = profile.name(), config_hash = %config.hash(), "starting probe");
+    info!(profile = profile.name(), config_hash = %config.hash(), "starting bot");
 
     let creds = Credentials::from_env()?;
     let rest = Arc::new(BybitRest::new(profile.rest_base_url().to_string(), creds));
 
-    // 1. Prove authentication works.
+    // 1. Authenticate.
     let balance = rest.balance().await?;
     info!(equity = %balance.equity, available = %balance.available, "authenticated");
 
-    // 2. Prove market data works and instrument metadata parses.
+    // 2. Load instrument metadata; every order and every universe filter
+    //    needs tick size, quantity step and listing age.
     let instruments = rest.instruments().await?;
     info!(count = instruments.len(), "loaded tradable instruments");
-
-    let tickers = rest.tickers().await?;
-    let mut ranked: Vec<_> = tickers
-        .into_iter()
-        .filter(|t| t.turnover_24h >= rust_decimal::Decimal::from(config.universe.min_turnover_24h))
-        .collect();
-    ranked.sort_by_key(|t| std::cmp::Reverse(t.turnover_24h));
-    ranked.truncate(config.universe.size);
-    info!(count = ranked.len(), top = ?ranked.first().map(|t| t.symbol.as_str()), "universe ranked");
-
-    if ranked.is_empty() {
-        error!(
-            min_turnover_24h = config.universe.min_turnover_24h,
-            "no symbol met the turnover floor; the probe would subscribe to nothing"
-        );
-        return Err("universe filter produced an empty symbol list".into());
-    }
 
     // turso::Builder::new_local expects the parent directory to already
     // exist; create it so a fresh checkout can run without a manual
@@ -69,8 +74,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all("data")
         .map_err(|e| format!("failed to create data directory \"data\": {e}"))?;
 
-    // 3. Prove the journal works, falling back to local-only when Turso is
-    //    not configured or unreachable — never a reason to refuse to start.
+    // 3. Open the journal, falling back to local-only when Turso is not
+    //    configured or unreachable — never a reason to refuse to start.
     let journal = match (
         std::env::var("TURSO_DATABASE_URL"),
         std::env::var("TURSO_AUTH_TOKEN"),
@@ -110,26 +115,172 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     spawn_sync_task(Arc::clone(&journal), Duration::from_secs(30));
 
-    // 4. Prove the streaming feed works end to end.
+    // 4. Build the strategy, the risk envelope and the engine that wires
+    //    them together. The strategy's own declared timeframes and warmup
+    //    requirement drive every subsequent warm-up and subscription — they
+    //    are captured here, before the strategy is boxed into the engine,
+    //    because nothing downstream can reach inside the engine to ask it.
+    let strategy_params = params_from_f64_config(
+        config.strategy.ema_fast,
+        config.strategy.ema_slow,
+        config.strategy.ema_entry,
+        config.strategy.rsi_period,
+        config.strategy.rsi_long_trigger,
+        config.strategy.rsi_short_trigger,
+        config.strategy.atr_period,
+        config.strategy.atr_band_min_pct,
+        config.strategy.atr_band_max_pct,
+        config.strategy.swing_lookback,
+        config.strategy.atr_stop_multiple,
+        config.strategy.reward_multiple,
+    )?;
+    let pullback = PullbackStrategy::new(strategy_params);
+    let strategy_timeframes: Vec<Timeframe> = pullback.timeframes().to_vec();
+    let warmup_candles = pullback.warmup_candles();
+    let warmup_limit = warmup_candles as u16;
+
+    let risk_params = RiskParams {
+        risk_pct: config_decimal(config.risk.risk_pct, "risk.risk_pct")?,
+        max_concurrent_positions: config.risk.max_concurrent_positions as usize,
+        max_daily_entries: config.risk.max_daily_entries,
+        daily_drawdown_halt_pct: config_decimal(
+            config.risk.daily_drawdown_halt_pct,
+            "risk.daily_drawdown_halt_pct",
+        )?,
+        total_drawdown_halt_pct: config_decimal(
+            config.risk.total_drawdown_halt_pct,
+            "risk.total_drawdown_halt_pct",
+        )?,
+        liq_buffer_multiple: config_decimal(
+            config.risk.liq_buffer_multiple,
+            "risk.liq_buffer_multiple",
+        )?,
+    };
+    let stop_limit_offset_atr = config_decimal(
+        config.strategy.stop_limit_offset_atr,
+        "strategy.stop_limit_offset_atr",
+    )?;
+
+    // Entries are always timed on H1 (the pullback strategy only signals on
+    // H1 closes), so the expiry window the reconciler uses to judge a
+    // resting order's age is expressed in H1 candles regardless of which
+    // other timeframes the strategy also consumes.
+    let expiry_window_ms =
+        Timeframe::H1.duration_ms() * i64::from(config.strategy.entry_expiry_candles);
+
+    let mut engine_loop = EngineLoop::new(
+        Box::new(pullback),
+        RiskManager::new(risk_params, stop_limit_offset_atr),
+        Arc::clone(&rest) as Arc<dyn ExchangeClient>,
+        Arc::clone(&journal),
+        instruments.clone(),
+        config.hash(),
+        config.strategy.entry_expiry_candles,
+        warmup_candles,
+    );
+
+    // 5. Reconcile BEFORE any strategy evaluation. A restart, crash or
+    //    manual intervention can leave this process believing something
+    //    untrue; the exchange settles every disagreement. Resting orders the
+    //    exchange still shows land straight in the engine's own tracker —
+    //    there is no separate tracker to reconcile into and then copy over.
+    let report = reconcile(
+        rest.as_ref(),
+        engine_loop.tracker_mut(),
+        rest.clock().now_ms(),
+        expiry_window_ms,
+    )
+    .await?;
+    info!(
+        adopted_positions = report.adopted_positions.len(),
+        adopted_orders = report.adopted_orders.len(),
+        cancelled_stale = report.cancelled_stale.len(),
+        "reconciled against the exchange"
+    );
+    for symbol in &report.unprotected {
+        warn!(%symbol, "adopted position — verify it carries a stop and target");
+    }
+
+    // 6. Rank the tradable universe, always keeping symbols reconciliation
+    //    just adopted so their candles keep arriving and the engine can
+    //    manage them to a close.
+    let protected = engine_loop.protected_symbols().await?;
+    let tickers = rest.tickers().await?;
+    let universe_filter = UniverseFilter {
+        size: config.universe.size,
+        min_turnover_24h: Decimal::from(config.universe.min_turnover_24h),
+        min_listing_age_days: config.universe.min_listing_age_days,
+    };
+    let symbols = select_universe(
+        &tickers,
+        &instruments,
+        &universe_filter,
+        rest.clock().now_ms(),
+        &protected,
+    );
+    info!(
+        count = symbols.len(),
+        top = ?symbols.first().map(Symbol::as_str),
+        "universe ranked"
+    );
+    if symbols.is_empty() {
+        error!(
+            min_turnover_24h = config.universe.min_turnover_24h,
+            "no symbol met the turnover floor; there is nothing to subscribe to"
+        );
+        return Err("universe filter produced an empty symbol list".into());
+    }
+
+    // 7. Warm EVERY timeframe the strategy declares, for every symbol in the
+    //    universe. `CandleStore::is_stale` treats a stream that has never
+    //    produced a candle as stale forever, and staleness is checked across
+    //    every declared timeframe on each candle close — so a symbol whose
+    //    H4 history was never fetched would refuse every signal permanently,
+    //    not just until the next H4 close.
+    for symbol in &symbols {
+        for &tf in &strategy_timeframes {
+            let candles = rest.klines(symbol, tf, warmup_limit).await?;
+            info!(%symbol, ?tf, candles = candles.len(), "warmup history loaded");
+            engine_loop.warm(symbol, tf, candles);
+        }
+    }
+    let mut current_universe: HashSet<Symbol> = symbols.iter().cloned().collect();
+
+    // 8. Stream market data for every symbol across every declared
+    //    timeframe — not just H1. The staleness gate above only stays
+    //    satisfied if H4 keeps receiving live candles too.
     let feed = BybitPublicFeed::new(profile.ws_public_url().to_string(), Arc::clone(&rest));
-    let subs: Vec<Subscription> = ranked
+    let subs: Vec<Subscription> = symbols
         .iter()
-        .take(3)
-        .map(|t| Subscription {
-            symbol: Symbol::new(t.symbol.as_str()),
-            timeframe: Timeframe::H1,
+        .flat_map(|s| {
+            strategy_timeframes.iter().map(move |&tf| Subscription {
+                symbol: s.clone(),
+                timeframe: tf,
+            })
         })
         .collect();
     let mut rx = feed.subscribe(&subs).await?;
-    info!(symbols = ?subs.iter().map(|s| s.symbol.as_str()).collect::<Vec<_>>(), "streaming klines");
+    info!(
+        symbols = symbols.len(),
+        timeframes = strategy_timeframes.len(),
+        "streaming klines"
+    );
 
-    // 5. Warm up from history so a candle close is not needed to see data.
-    for sub in &subs {
-        let candles = rest.klines(&sub.symbol, sub.timeframe, 250).await?;
-        info!(symbol = %sub.symbol, candles = candles.len(), "warmup history loaded");
-    }
+    // 9. Stream account data. `ClockOffset` cannot be cloned, so the private
+    //    feed shares the exact instance `rest` uses for signing via
+    //    `clock_handle()` (an `Arc` accessor added to `BybitRest` for this)
+    //    rather than starting from an independent, uncorrected clock.
+    let private = BybitPrivateFeed::new(
+        profile.ws_private_url().to_string(),
+        Credentials::from_env()?,
+        rest.clock_handle(),
+    );
+    let mut account_rx = private.subscribe();
 
-    info!("probe running; Ctrl-C to exit");
+    let mut rerank = tokio::time::interval(Duration::from_secs(86_400));
+    rerank.tick().await; // the first tick fires immediately; skip it
+
+    info!("bot running; Ctrl-C to exit");
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -148,10 +299,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             event = rx.recv() => match event {
                 Ok(MarketEvent::CandleClosed { symbol, tf, candle }) => {
-                    info!(%symbol, ?tf, close = %candle.close, "candle closed");
+                    match engine_loop.on_candle_closed(&symbol, tf, &candle).await {
+                        Ok(outcome) => info!(%symbol, ?tf, ?outcome, "candle processed"),
+                        Err(e) => {
+                            if e.class() == ErrorClass::Fatal {
+                                error!(%symbol, error = %e, "fatal error processing a candle; halting");
+                                return Err(e.into());
+                            }
+                            warn!(%symbol, error = %e, "processing a candle failed");
+                        }
+                    }
                 }
-                Ok(MarketEvent::GapFilled { symbol, candles, .. }) => {
-                    info!(%symbol, count = candles.len(), "gap backfilled");
+                Ok(MarketEvent::GapFilled { symbol, tf, candles }) => {
+                    info!(%symbol, count = candles.len(), "rewarming after a gap backfill");
+                    engine_loop.warm(&symbol, tf, candles);
                 }
                 // A closed channel means the feed task itself has ended. That
                 // is the signal a Fatal feed error uses to reach us, and it is
@@ -163,9 +324,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // Lagged means we fell behind a live feed, not that it died.
                 Err(RecvError::Lagged(skipped)) => {
-                    warn!(skipped, "probe fell behind the market feed");
+                    warn!(skipped, "fell behind the market feed");
                 }
             },
+            account = account_rx.recv() => match account {
+                Ok(event) => info!(?event, "account event"),
+                // The private feed breaks its loop on a Fatal error (e.g. a
+                // rejected auth) for exactly the same reason the public feed
+                // does: dropping the sender is an unambiguous signal on the
+                // existing subscribe() receiver, with no separate health
+                // channel required. Mirrored here identically to the market
+                // feed's Closed arm above — both mean a feed died, and that is
+                // a halt condition.
+                Err(RecvError::Closed) => {
+                    error!("account feed channel closed; the private feed has died");
+                    return Err("account feed channel closed".into());
+                }
+                Err(RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "fell behind the account feed");
+                }
+            },
+            _ = rerank.tick() => {
+                let protected = engine_loop.protected_symbols().await?;
+                let tickers = rest.tickers().await?;
+                let fresh_instruments = rest.instruments().await?;
+                let ranked = select_universe(
+                    &tickers,
+                    &fresh_instruments,
+                    &universe_filter,
+                    rest.clock().now_ms(),
+                    &protected,
+                );
+                let ranked_set: HashSet<Symbol> = ranked.iter().cloned().collect();
+
+                // Warm every declared timeframe for any symbol that was not
+                // already being tracked, for the same reason startup does:
+                // an unwarmed timeframe reports Stale forever, not just until
+                // its next close.
+                for symbol in ranked.iter().filter(|s| !current_universe.contains(*s)) {
+                    for &tf in &strategy_timeframes {
+                        let candles = rest.klines(symbol, tf, warmup_limit).await?;
+                        engine_loop.warm(symbol, tf, candles);
+                    }
+                }
+
+                let dropped = engine_loop.retain_symbols(&ranked_set);
+                info!(universe = ranked.len(), dropped, "daily universe re-rank");
+                current_universe = ranked_set;
+            }
         }
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use botcore::{
     Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe,
@@ -29,7 +31,7 @@ pub struct BybitRest {
     base_url: String,
     creds: Credentials,
     http: reqwest::Client,
-    clock: ClockOffset,
+    clock: Arc<ClockOffset>,
     limiter: RateLimiter,
 }
 
@@ -42,13 +44,24 @@ impl BybitRest {
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("reqwest client builds with default TLS"),
-            clock: ClockOffset::new(),
+            clock: Arc::new(ClockOffset::new()),
             limiter: RateLimiter::new(30, 10),
         }
     }
 
     pub fn clock(&self) -> &ClockOffset {
         &self.clock
+    }
+
+    /// A shared handle to the exact same clock offset every signed REST call
+    /// uses. `ClockOffset` cannot be cloned — cloning would fork the offset,
+    /// so a second holder would stop tracking corrections this client
+    /// observes on every response. Returning the same `Arc` instead lets a
+    /// caller (the private WebSocket feed, which also needs clock-corrected
+    /// timestamps for its auth frames) share the one instance rather than
+    /// starting from an uncorrected zero offset.
+    pub fn clock_handle(&self) -> Arc<ClockOffset> {
+        Arc::clone(&self.clock)
     }
 
     /// Signed GET with query parameters, retried on `Retryable` failures.
