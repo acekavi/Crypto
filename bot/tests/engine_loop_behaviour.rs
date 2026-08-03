@@ -33,6 +33,18 @@ fn candle(open_time_ms: i64) -> Candle {
     }
 }
 
+fn candle_hlc(open_time_ms: i64, high: Decimal, low: Decimal, close: Decimal) -> Candle {
+    Candle {
+        open_time_ms,
+        open: close,
+        high,
+        low,
+        close,
+        volume: Decimal::ZERO,
+        turnover: Decimal::ZERO,
+    }
+}
+
 async fn loop_with(mock: Arc<MockExchange>) -> (EngineLoop, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let j = Arc::new(
@@ -136,18 +148,89 @@ async fn an_expired_resting_order_is_cancelled_on_a_later_candle() {
 #[tokio::test]
 async fn a_zero_equity_account_refuses_rather_than_placing() {
     // An unfunded testnet account must produce a named refusal, not an order.
+    //
+    // This drives a genuine engineered long setup (a rising 4h bias, a 1h
+    // pullback into EMA20, and an RSI cross back through the long trigger)
+    // all the way to `risk.evaluate`, so the "no orders placed" assertion
+    // below actually proves the zero-equity refusal rather than merely
+    // observing that a strategy which never produced a signal also never
+    // placed an order — the flaw in the version this replaces. The numeric
+    // shape (ramp, dip, reversal) is adapted from
+    // crates/strategy/tests/pullback_setups.rs's proven
+    // `an_engineered_long_setup_fires_with_coherent_geometry`, extended so a
+    // full 260-candle 4h bias series can be interleaved at Bybit's real
+    // cadence (1 four-hour candle per 4 one-hour candles) without either
+    // stream ever going stale. A standalone probe against the strategy
+    // crate directly confirmed offsets 1.5-3.5 (from the reversal candle's
+    // close) all fire a signal on this longer ramp; 2.5 is used here for
+    // margin.
     use botcore::Balance;
     let mock = Arc::new(MockExchange::new().with_balance(Balance {
         equity: Decimal::ZERO,
         available: Decimal::ZERO,
     }));
     let (mut el, _d) = loop_with(mock.clone()).await;
+    let sym = Symbol::new("BTCUSDT");
 
-    for i in 0..300i64 {
-        let _ = el
-            .on_candle_closed(&Symbol::new("BTCUSDT"), Timeframe::H1, &candle(i * H1))
-            .await;
+    // Pre-seed both CandleStore windows so `is_warm` holds from the very
+    // first real candle, and both streams share the same anchor (T=0) so
+    // the cross-timeframe staleness gate never trips before a real candle
+    // has been fed. `CandleStore::warm` does not require its seed to be
+    // evenly spaced — only the count (>=250, for `is_warm`) and the latest
+    // timestamp (which becomes `last_open_ms`) matter.
+    let seed: Vec<Candle> = (-249..=0).map(candle).collect();
+    el.warm(&sym, Timeframe::H1, seed.clone());
+    el.warm(&sym, Timeframe::H4, seed);
+
+    const RAMP: i64 = 1040;
+    const DIP: i64 = 14;
+    let mut px = Decimal::from(100);
+    let mut px_h4 = Decimal::from(100);
+    let mut refused = false;
+
+    // Drive H1 forward one hour at a time; every 4th hour also drive H4 —
+    // Bybit's real cadence, since a 4h candle is exactly 4 1h candles — so
+    // neither stream ever goes stale relative to the other.
+    for i in 1..=(RAMP + DIP + 1) {
+        let t = i * H1;
+        let h1 = if i <= RAMP {
+            // Uptrend: warms EMA20/RSI14/ATR14 and, via the interleaved H4
+            // candles below, establishes a long bias (EMA50 > EMA200).
+            let c = candle_hlc(t, px + dec!(1), px - dec!(1), px);
+            px += dec!(0.5);
+            c
+        } else if i <= RAMP + DIP {
+            // Dip: walks RSI down through the 40 long trigger.
+            px -= dec!(0.5);
+            candle_hlc(t, px + dec!(1), px - dec!(1), px)
+        } else {
+            // Reversal: closes back up (crossing RSI back above 40) while
+            // its low lands on EMA20, completing the pullback.
+            let close = px + dec!(5);
+            candle_hlc(t, close + dec!(1), close - dec!(2.5), close)
+        };
+
+        let out = el
+            .on_candle_closed(&sym, Timeframe::H1, &h1)
+            .await
+            .expect("handled");
+        if matches!(out, CandleOutcome::Refused(_)) {
+            refused = true;
+        }
+
+        if i % 4 == 0 {
+            let h4 = candle_hlc(t, px_h4 + dec!(1), px_h4 - dec!(1), px_h4);
+            px_h4 += dec!(0.5);
+            el.on_candle_closed(&sym, Timeframe::H4, &h4)
+                .await
+                .expect("handled");
+        }
     }
+
+    assert!(
+        refused,
+        "the engineered setup must reach the risk layer and be refused for zero equity"
+    );
     assert!(
         mock.placed_orders().is_empty(),
         "a zero-equity account must never place an order"
@@ -200,4 +283,49 @@ async fn a_fresh_pair_of_required_timeframes_does_not_trigger_staleness() {
     // Deliberately not asserting which gate produced the outcome (this
     // stream is not warm yet) — only that staleness is not it.
     assert!(!matches!(out, CandleOutcome::Skipped(SkipReason::Stale)));
+}
+
+const DAY: i64 = 86_400_000;
+
+#[tokio::test]
+async fn the_day_start_equity_baseline_rolls_over_at_the_utc_day_boundary() {
+    // Not `is_zero()`: a baseline captured only once for the life of the
+    // process would let the "daily" drawdown halt keep measuring against
+    // whatever equity existed at first startup, silently degenerating into
+    // a permanent since-launch check the longer the bot stays up.
+    //
+    // `MockExchange`'s balance is fixed at construction with no setter, and
+    // changing that is outside this task — so this asserts the mechanism
+    // that was actually broken (the day boundary the baseline is captured
+    // for) rather than the baseline's value, which cannot vary here anyway.
+    // Comfortably past the epoch UTC day so `day_start_ms`'s initial `0`
+    // sentinel cannot coincide with a legitimately-epoch-adjacent boundary.
+    let mock = Arc::new(MockExchange::new());
+    let (mut el, _d) = loop_with(mock.clone()).await;
+
+    let day5_start = 5 * DAY;
+    el.account_state_for_test(day5_start + H1)
+        .await
+        .expect("day 5 state");
+    let (captured_day, equity) = el.day_baseline_for_test();
+    assert_eq!(captured_day, day5_start, "must capture day 5's own start");
+    assert_eq!(equity, dec!(10000), "must capture the current equity");
+
+    // Still day 5: the baseline must not move.
+    el.account_state_for_test(day5_start + 20 * H1)
+        .await
+        .expect("still day 5");
+    let (unmoved_day, _) = el.day_baseline_for_test();
+    assert_eq!(unmoved_day, day5_start, "must not move within the same day");
+
+    // Cross into day 6.
+    let day6_start = 6 * DAY;
+    el.account_state_for_test(day6_start + H1)
+        .await
+        .expect("day 6 state");
+    let (rolled_day, _) = el.day_baseline_for_test();
+    assert_eq!(
+        rolled_day, day6_start,
+        "must roll over to day 6's own start"
+    );
 }

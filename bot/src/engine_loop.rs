@@ -49,6 +49,11 @@ pub struct EngineLoop {
     instruments: HashMap<String, Instrument>,
     high_water_mark: Decimal,
     day_start_equity: Decimal,
+    /// The UTC day `day_start_equity` was captured for. When the clock
+    /// crosses into a new day the baseline is recaptured, otherwise the
+    /// "daily" drawdown halt would keep measuring against first-startup
+    /// equity and silently become a permanent-since-launch check.
+    day_start_ms: i64,
 }
 
 impl EngineLoop {
@@ -78,6 +83,7 @@ impl EngineLoop {
                 .collect(),
             high_water_mark: Decimal::ZERO,
             day_start_equity: Decimal::ZERO,
+            day_start_ms: 0,
         }
     }
 
@@ -94,6 +100,29 @@ impl EngineLoop {
     /// Test-only alias so integration tests can seed a resting order.
     pub fn track_for_test(&mut self, order: RestingOrder) {
         self.track(order);
+    }
+
+    /// Test-only: assemble account state directly, without needing a
+    /// strategy signal to reach it. In production `account_state` only runs
+    /// once a candle produces a signal; exercising the daily baseline
+    /// rollover through the full candle-to-signal path would need an
+    /// engineered setup on two different UTC days, which is disproportionate
+    /// to what this is testing. `#[cfg(test)]` cannot gate this: an
+    /// integration test under `bot/tests/` links against this crate as an
+    /// ordinary dependency, not compiled with `--cfg test`, so a
+    /// `#[cfg(test)]` item would not exist from its point of view — the same
+    /// reason `track_for_test`, above, is a plain `pub fn`.
+    pub async fn account_state_for_test(
+        &mut self,
+        now_ms: i64,
+    ) -> Result<risk::AccountState, ExchangeError> {
+        self.account_state(now_ms).await
+    }
+
+    /// Test-only: the UTC day the equity baseline was captured for, and the
+    /// baseline itself.
+    pub fn day_baseline_for_test(&self) -> (i64, Decimal) {
+        (self.day_start_ms, self.day_start_equity)
     }
 
     /// Symbols that must not be dropped from the universe: they hold a
@@ -205,12 +234,18 @@ impl EngineLoop {
         let balance = self.client.balance().await?;
         let positions = self.client.positions().await?;
 
-        if self.day_start_equity.is_zero() {
+        // Recapture the baseline whenever the clock has crossed into a new
+        // UTC day, not just once at process start — otherwise the "daily"
+        // drawdown halt keeps measuring against whatever equity existed at
+        // first startup, and silently degenerates into a permanent
+        // since-launch check the longer the process stays up.
+        let day_start = utc_day_start_ms(now_ms);
+        if day_start != self.day_start_ms {
+            self.day_start_ms = day_start;
             self.day_start_equity = balance.equity;
         }
         self.high_water_mark = engine::update_high_water_mark(self.high_water_mark, balance.equity);
 
-        let day_start = utc_day_start_ms(now_ms);
         let entries_filled_today = self
             .journal
             .daily_fill_count(day_start)
