@@ -163,3 +163,62 @@ async fn a_mix_of_fresh_and_stale_orders_is_split_correctly() {
     assert!(tracker.is_resting("fresh"));
     assert!(!tracker.is_resting("stale"));
 }
+
+#[tokio::test]
+async fn an_order_whose_cancel_fails_is_left_unadopted_and_unreported() {
+    // The subtlest correctness point in reconciliation. A stale order we
+    // failed to cancel is still live on the exchange, but we do NOT know its
+    // fate — so it must not be adopted (which would manage it as if fresh,
+    // letting it fill on an expired setup) and must not be reported as
+    // cancelled (which would claim something the exchange never confirmed).
+    // Leaving it in neither bucket means the next reconcile sees it again.
+    let mock = MockExchange::new()
+        .with_open_orders(vec![open_order("stubborn", NOW - 10 * H1)])
+        .fail_cancel_always(exchange::bybit::transport::ExchangeError::WebSocket(
+            "injected cancel failure".into(),
+        ));
+    let mut tracker = OrderTracker::new(3);
+
+    let report = reconcile(&mock, &mut tracker, NOW, 3 * H1)
+        .await
+        .expect("reconcile itself must not fail because one cancel did");
+
+    assert!(
+        !tracker.is_resting("stubborn"),
+        "an order we failed to cancel must not be adopted"
+    );
+    assert!(
+        !report.adopted_orders.contains(&"stubborn".to_string()),
+        "an order we failed to cancel must not be reported as adopted"
+    );
+    assert!(
+        !report.cancelled_stale.contains(&"stubborn".to_string()),
+        "cancelled_stale must only contain cancellations the exchange confirmed"
+    );
+    assert!(
+        mock.cancelled().is_empty(),
+        "a failed cancel must not be recorded as cancelled"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_cancel_does_not_stop_other_orders_being_processed() {
+    // One stubborn order must not prevent the rest of reconciliation.
+    let mock = MockExchange::new()
+        .with_open_orders(vec![
+            open_order("stubborn", NOW - 10 * H1),
+            open_order("fresh", NOW - H1),
+        ])
+        .fail_cancel_always(exchange::bybit::transport::ExchangeError::WebSocket(
+            "injected".into(),
+        ));
+    let mut tracker = OrderTracker::new(3);
+
+    let report = reconcile(&mock, &mut tracker, NOW, 3 * H1)
+        .await
+        .expect("reconciled");
+
+    assert_eq!(report.adopted_orders, vec!["fresh".to_string()]);
+    assert!(tracker.is_resting("fresh"));
+    assert!(!tracker.is_resting("stubborn"));
+}

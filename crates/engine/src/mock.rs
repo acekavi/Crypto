@@ -31,8 +31,8 @@ struct Recorded {
     place_entry_calls: usize,
 }
 
-/// Programmable failure for `place_limit_entry`.
-enum PlaceFailure {
+/// Programmable failure for an injected endpoint.
+enum InjectedFailure {
     None,
     Once(ExchangeError),
     Always(ExchangeError),
@@ -50,7 +50,8 @@ pub struct MockExchange {
     tickers: Vec<Ticker>,
     klines: HashMap<(String, Timeframe), Vec<Candle>>,
     open_orders: Vec<OpenOrder>,
-    place_failure: Mutex<PlaceFailure>,
+    place_failure: Mutex<InjectedFailure>,
+    cancel_failure: Mutex<InjectedFailure>,
     recorded: Mutex<Recorded>,
 }
 
@@ -72,7 +73,8 @@ impl MockExchange {
             tickers: Vec::new(),
             klines: HashMap::new(),
             open_orders: Vec::new(),
-            place_failure: Mutex::new(PlaceFailure::None),
+            place_failure: Mutex::new(InjectedFailure::None),
+            cancel_failure: Mutex::new(InjectedFailure::None),
             recorded: Mutex::new(Recorded::default()),
         }
     }
@@ -111,12 +113,27 @@ impl MockExchange {
     /// Fail the next `place_limit_entry` only. Models a request that timed out
     /// and will be retried.
     pub fn fail_place_entry_once(self, err: ExchangeError) -> Self {
-        *self.place_failure.lock().expect("mock lock") = PlaceFailure::Once(err);
+        *self.place_failure.lock().expect("mock lock") = InjectedFailure::Once(err);
         self
     }
 
     pub fn fail_place_entry_always(self, err: ExchangeError) -> Self {
-        *self.place_failure.lock().expect("mock lock") = PlaceFailure::Always(err);
+        *self.place_failure.lock().expect("mock lock") = InjectedFailure::Always(err);
+        self
+    }
+
+    /// Fail the next `cancel_order` only.
+    ///
+    /// Exists because the reconciler's failed-cancel branch — where a stale
+    /// order must be left UNADOPTED rather than silently managed as if fresh —
+    /// is otherwise unreachable in tests.
+    pub fn fail_cancel_once(self, err: ExchangeError) -> Self {
+        *self.cancel_failure.lock().expect("mock lock") = InjectedFailure::Once(err);
+        self
+    }
+
+    pub fn fail_cancel_always(self, err: ExchangeError) -> Self {
+        *self.cancel_failure.lock().expect("mock lock") = InjectedFailure::Always(err);
         self
     }
 
@@ -171,13 +188,13 @@ impl ExchangeClient for MockExchange {
         // accepted this" from "we asked".
         let mut failure = self.place_failure.lock().expect("mock lock");
         match &*failure {
-            PlaceFailure::Always(e) => return Err(clone_error(e)),
-            PlaceFailure::Once(e) => {
+            InjectedFailure::Always(e) => return Err(clone_error(e)),
+            InjectedFailure::Once(e) => {
                 let err = clone_error(e);
-                *failure = PlaceFailure::None;
+                *failure = InjectedFailure::None;
                 return Err(err);
             }
-            PlaceFailure::None => {}
+            InjectedFailure::None => {}
         }
         drop(failure);
 
@@ -204,6 +221,21 @@ impl ExchangeClient for MockExchange {
     }
 
     async fn cancel_order(&self, _symbol: &Symbol, link_id: &str) -> Result<(), ExchangeError> {
+        // A failed cancellation is deliberately NOT recorded as cancelled, for
+        // the same reason a failed placement is not recorded as placed: callers
+        // must be able to distinguish "the exchange did this" from "we asked".
+        {
+            let mut failure = self.cancel_failure.lock().expect("mock lock");
+            match &*failure {
+                InjectedFailure::Always(e) => return Err(clone_error(e)),
+                InjectedFailure::Once(e) => {
+                    let err = clone_error(e);
+                    *failure = InjectedFailure::None;
+                    return Err(err);
+                }
+                InjectedFailure::None => {}
+            }
+        }
         self.recorded
             .lock()
             .expect("mock lock")
