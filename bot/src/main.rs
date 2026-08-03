@@ -10,7 +10,7 @@ use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use exchange::bybit::ws_private::BybitPrivateFeed;
 use exchange::bybit::ws_public::BybitPublicFeed;
-use exchange::{ExchangeClient, MarketEvent, MarketFeed, Subscription};
+use exchange::{ExchangeClient, MarketEvent, Subscription};
 use persistence::{Journal, JournalError, spawn_sync_task};
 use risk::{RiskManager, RiskParams};
 use rust_decimal::Decimal;
@@ -30,6 +30,22 @@ fn config_decimal(value: f64, field: &'static str) -> Result<Decimal, Box<dyn st
     }
     Decimal::from_f64(value)
         .ok_or_else(|| format!("config field {field} ({value}) cannot convert to Decimal").into())
+}
+
+/// Cross-product every symbol with every declared timeframe.
+///
+/// Shared between the startup subscription and each daily re-rank so the two
+/// can never drift into subscribing a different shape of topic set.
+fn build_subscriptions(symbols: &[Symbol], timeframes: &[Timeframe]) -> Vec<Subscription> {
+    symbols
+        .iter()
+        .flat_map(|s| {
+            timeframes.iter().map(move |&tf| Subscription {
+                symbol: s.clone(),
+                timeframe: tf,
+            })
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -250,16 +266,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    timeframe — not just H1. The staleness gate above only stays
     //    satisfied if H4 keeps receiving live candles too.
     let feed = BybitPublicFeed::new(profile.ws_public_url().to_string(), Arc::clone(&rest));
-    let subs: Vec<Subscription> = symbols
-        .iter()
-        .flat_map(|s| {
-            strategy_timeframes.iter().map(move |&tf| Subscription {
-                symbol: s.clone(),
-                timeframe: tf,
-            })
-        })
-        .collect();
-    let mut rx = feed.subscribe(&subs).await?;
+    let subs = build_subscriptions(&symbols, &strategy_timeframes);
+    let (mut rx, mut feed_handle) = feed.subscribe_with_handle(&subs).await?;
     info!(
         symbols = symbols.len(),
         timeframes = strategy_timeframes.len(),
@@ -328,7 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             },
             account = account_rx.recv() => match account {
-                Ok(event) => info!(?event, "account event"),
+                Ok(event) => engine_loop.on_account_event(&event).await,
                 // The private feed breaks its loop on a Fatal error (e.g. a
                 // rejected auth) for exactly the same reason the public feed
                 // does: dropping the sender is an unambiguous signal on the
@@ -370,6 +378,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let dropped = engine_loop.retain_symbols(&ranked_set);
                 info!(universe = ranked.len(), dropped, "daily universe re-rank");
+
+                // Only tear down and rebuild the socket when membership
+                // actually changed — every symbol above has already been
+                // warmed over REST before this point, so a newly-entered
+                // symbol's first candle on the new subscription never lands
+                // in a cold store.
+                if ranked_set != current_universe {
+                    let joined = ranked_set.difference(&current_universe).count();
+                    let left = current_universe.difference(&ranked_set).count();
+                    info!(joined, left, "universe membership changed; resubscribing market data");
+
+                    feed_handle.abort();
+                    let new_subs = build_subscriptions(&ranked, &strategy_timeframes);
+                    let (new_rx, new_handle) = feed.subscribe_with_handle(&new_subs).await?;
+                    rx = new_rx;
+                    feed_handle = new_handle;
+                }
+
                 current_universe = ranked_set;
             }
         }

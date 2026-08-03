@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use botcore::{Candle, Instrument, Symbol, Timeframe};
+use botcore::{Candle, Instrument, OrderState, Symbol, Timeframe};
 use engine::{
     Acceptance, CandleStore, Executor, JournalFacts, OrderTracker, RestingOrder, TrackerAction,
     assemble_account_state, utc_day_start_ms,
 };
 use exchange::ExchangeClient;
 use exchange::bybit::transport::ExchangeError;
+use exchange::bybit::ws_private::AccountEvent;
 use persistence::Journal;
 use risk::{Decision, Refusal, RiskManager};
 use rust_decimal::Decimal;
@@ -111,6 +112,42 @@ impl EngineLoop {
     /// Test-only alias so integration tests can seed a resting order.
     pub fn track_for_test(&mut self, order: RestingOrder) {
         self.track(order);
+    }
+
+    /// Apply an account-state change from the private feed.
+    ///
+    /// Without this the tracker never learns that an order filled: it would
+    /// keep believing the entry is resting and, on expiry, try to cancel an
+    /// order the exchange already executed.
+    pub async fn on_account_event(&mut self, event: &AccountEvent) {
+        match event {
+            AccountEvent::OrderUpdate(order) => {
+                self.tracker.on_order_update(order);
+                // Mirror the state change into the journal. A journal failure
+                // must never disturb trading, so it is logged, not propagated.
+                let filled_at = matches!(
+                    order.state,
+                    OrderState::Filled | OrderState::PartiallyFilled
+                )
+                .then_some(order.created_time_ms);
+                if let Err(e) = self
+                    .journal
+                    .update_order_state(
+                        &order.order_link_id,
+                        order.state,
+                        order.cum_exec_qty,
+                        filled_at,
+                    )
+                    .await
+                {
+                    warn!(link_id = %order.order_link_id, error = %e, "journalling an order update failed");
+                }
+            }
+            AccountEvent::PositionClosed { symbol } => {
+                info!(%symbol, "position closed");
+            }
+            AccountEvent::PositionUpdate(_) | AccountEvent::WalletUpdate(_) => {}
+        }
     }
 
     /// Test-only: assemble account state directly, without needing a

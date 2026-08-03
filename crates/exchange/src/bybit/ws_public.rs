@@ -149,6 +149,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
@@ -170,20 +171,23 @@ impl BybitPublicFeed {
     pub fn new(ws_url: String, rest: Arc<BybitRest>) -> Self {
         BybitPublicFeed { ws_url, rest }
     }
-}
 
-#[async_trait]
-impl MarketFeed for BybitPublicFeed {
-    async fn subscribe(
+    /// Subscribe and return the driving task's handle alongside the receiver.
+    ///
+    /// The trait's `subscribe` deliberately hides the task, but a long-running
+    /// bot re-ranks its universe daily and must be able to stop the old
+    /// subscription before starting a new one — otherwise every re-rank leaks
+    /// a task and a socket.
+    pub async fn subscribe_with_handle(
         &self,
         subs: &[Subscription],
-    ) -> Result<broadcast::Receiver<MarketEvent>, ExchangeError> {
+    ) -> Result<(broadcast::Receiver<MarketEvent>, JoinHandle<()>), ExchangeError> {
         let (tx, rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let url = self.ws_url.clone();
         let rest = Arc::clone(&self.rest);
         let subs = subs.to_vec();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // Last confirmed candle open time per (symbol, timeframe), used to
             // detect gaps across reconnects.
             let mut last_open: HashMap<(Symbol, Timeframe), i64> = HashMap::new();
@@ -219,7 +223,19 @@ impl MarketFeed for BybitPublicFeed {
             }
         });
 
-        Ok(rx)
+        Ok((rx, handle))
+    }
+}
+
+#[async_trait]
+impl MarketFeed for BybitPublicFeed {
+    async fn subscribe(
+        &self,
+        subs: &[Subscription],
+    ) -> Result<broadcast::Receiver<MarketEvent>, ExchangeError> {
+        self.subscribe_with_handle(subs)
+            .await
+            .map(|(rx, _handle)| rx)
     }
 }
 

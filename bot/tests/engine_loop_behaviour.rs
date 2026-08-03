@@ -146,6 +146,53 @@ async fn an_expired_resting_order_is_cancelled_on_a_later_candle() {
 }
 
 #[tokio::test]
+async fn an_account_event_marking_an_order_filled_stops_it_from_resting() {
+    // Without EngineLoop::on_account_event feeding the private feed into the
+    // tracker, the tracker never learns a resting entry filled: it would
+    // still believe the entry is resting and, on expiry, try to cancel an
+    // order the exchange already executed.
+    use botcore::{OpenOrder, OrderState, Side};
+    use engine::RestingOrder;
+    use exchange::bybit::ws_private::AccountEvent;
+
+    let mock = Arc::new(MockExchange::new());
+    let (mut el, _d) = loop_with(mock.clone()).await;
+
+    el.track_for_test(RestingOrder {
+        link_id: "filled-entry".into(),
+        symbol: Symbol::new("BTCUSDT"),
+        side: Side::Buy,
+        qty: dec!(1),
+        cum_exec_qty: Decimal::ZERO,
+        placed_at_candle_ms: 0,
+    });
+    assert!(
+        el.tracker_mut().is_resting("filled-entry"),
+        "setup: the order must start out resting"
+    );
+
+    let event = AccountEvent::OrderUpdate(OpenOrder {
+        symbol: Symbol::new("BTCUSDT"),
+        order_id: "oid-1".into(),
+        order_link_id: "filled-entry".into(),
+        side: Side::Buy,
+        price: dec!(100),
+        qty: dec!(1),
+        cum_exec_qty: dec!(1),
+        state: OrderState::Filled,
+        created_time_ms: 0,
+    });
+
+    el.on_account_event(&event).await;
+
+    assert!(
+        !el.tracker_mut().is_resting("filled-entry"),
+        "a Filled account event must reach OrderTracker::on_order_update so it stops \
+         treating the order as resting"
+    );
+}
+
+#[tokio::test]
 async fn a_zero_equity_account_refuses_rather_than_placing() {
     // An unfunded testnet account must produce a named refusal, not an order.
     //
