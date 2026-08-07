@@ -332,6 +332,55 @@ impl HistoryDb {
     /// all: absent data is not evidence of zero turnover, and a caller
     /// ranking symbols must be able to drop such a symbol entirely rather
     /// than rank it at the bottom as if it were genuinely illiquid.
+    /// Every `(symbol, timeframe)` series present, with its recorded bounds.
+    ///
+    /// Reads `download_ranges` rather than scanning `candles`, so it stays
+    /// cheap as history grows. Ordered by symbol then timeframe so a caller
+    /// building a universe from it gets a deterministic list.
+    pub async fn stored_series(&self) -> Result<Vec<(Symbol, Timeframe, i64, i64)>, HistoryError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT symbol, timeframe, earliest_ms, latest_ms FROM download_ranges
+                 ORDER BY symbol ASC, timeframe ASC",
+                (),
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let text = |i: usize| -> Result<String, HistoryError> {
+                row.get_value(i)
+                    .map_err(|e| HistoryError::Db(e.to_string()))?
+                    .as_text()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| HistoryError::Decode(format!("column {i} is not text")))
+            };
+            let int = |i: usize| -> Result<i64, HistoryError> {
+                row.get_value(i)
+                    .map_err(|e| HistoryError::Db(e.to_string()))?
+                    .as_integer()
+                    .copied()
+                    .ok_or_else(|| HistoryError::Decode(format!("column {i} is not an integer")))
+            };
+
+            let tf_text = text(1)?;
+            // Stored as Bybit's own interval string, so map it back rather
+            // than inventing a second encoding that could drift from it.
+            let tf = match tf_text.as_str() {
+                "60" => Timeframe::H1,
+                "240" => Timeframe::H4,
+                other => {
+                    return Err(HistoryError::Decode(format!(
+                        "unknown stored timeframe {other:?}"
+                    )));
+                }
+            };
+            out.push((Symbol::new(text(0)?), tf, int(2)?, int(3)?));
+        }
+        Ok(out)
+    }
+
     pub async fn rolling_turnover_24h(
         &self,
         symbol: &Symbol,

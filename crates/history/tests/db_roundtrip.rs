@@ -201,3 +201,42 @@ async fn reinserting_a_funding_timestamp_does_not_duplicate_it() {
         1
     );
 }
+
+#[tokio::test]
+async fn stored_series_lists_every_symbol_and_timeframe_with_its_bounds() {
+    // A backtest discovers its universe from this rather than being told what
+    // to expect, so a symbol whose download was interrupted shows its real
+    // bounds instead of an assumed full range.
+    let (db, _dir) = temp_db().await;
+    let btc = Symbol::new("BTCUSDT");
+    let eth = Symbol::new("ETHUSDT");
+
+    db.insert_candles(
+        &btc,
+        Timeframe::H1,
+        &[candle(1000, dec!(1)), candle(5000, dec!(2))],
+    )
+    .await
+    .expect("insert");
+    db.insert_candles(&btc, Timeframe::H4, &[candle(2000, dec!(1))])
+        .await
+        .expect("insert");
+    db.insert_candles(&eth, Timeframe::H1, &[candle(3000, dec!(1))])
+        .await
+        .expect("insert");
+
+    let series = db.stored_series().await.expect("query");
+    assert_eq!(series.len(), 3);
+    // Ordered by symbol then timeframe, so the list is deterministic.
+    assert_eq!(series[0].0.as_str(), "BTCUSDT");
+    assert_eq!(series[0].1, Timeframe::H1);
+    assert_eq!((series[0].2, series[0].3), (1000, 5000));
+    assert_eq!(series[1].1, Timeframe::H4);
+    assert_eq!(series[2].0.as_str(), "ETHUSDT");
+}
+
+#[tokio::test]
+async fn stored_series_is_empty_on_a_fresh_database() {
+    let (db, _dir) = temp_db().await;
+    assert!(db.stored_series().await.expect("query").is_empty());
+}

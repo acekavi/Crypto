@@ -29,3 +29,9 @@ tracing.workspace = true
 [dev-dependencies]
 rust_decimal_macros.workspace = true
 tempfile = "3"
+
+# Lives here rather than in `bot` because `backtest` already depends on `bot`
+# for `EngineLoop`; a binary in `bot` needing `backtest` would be a cycle.
+[[bin]]
+name = "backtest"
+path = "src/bin/backtest.rs"
