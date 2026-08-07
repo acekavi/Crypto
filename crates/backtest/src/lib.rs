@@ -15,7 +15,7 @@ pub use metrics::{Metrics, compute, equity_curve};
 pub use random_entry::{BenchmarkDistribution, RandomEntryStrategy, percentile, run_benchmark};
 pub use replay::{BacktestConfig, BacktestError, BacktestResult, run_backtest};
 pub use report::{RunSummary, summarise};
-pub use sim_exchange::{ClosedTrade, ExitReason, SimulatedExchange};
+pub use sim_exchange::{ClosedTrade, ExitReason, SimulatedExchange, best_fillable};
 pub use walk_forward::{
     Fold, FoldResult, WalkForwardConfig, WalkForwardResult, folds, run_walk_forward,
 };

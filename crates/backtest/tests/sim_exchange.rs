@@ -438,3 +438,169 @@ async fn a_position_is_not_charged_for_funding_that_predates_its_entry() {
         "both timestamps precede or coincide with entry"
     );
 }
+
+#[tokio::test]
+async fn with_several_resting_orders_the_one_price_reaches_first_fills() {
+    // THE BUG THIS GUARDS. `resting` is a HashMap, and picking a fill by
+    // iterating it made the choice depend on hash order. Every existing
+    // determinism test used a strategy that rests ONE order per symbol, so
+    // none of them could see it — the same backtest produced 255 trades on one
+    // run and 257 on the next, and the gate's comparisons all assume
+    // reproducibility.
+    //
+    // Three buy limits at 100, 98 and 96. Price trades down through all three,
+    // so all are fillable — but price reaches 100 first, so that is the one
+    // that fills.
+    let sym = Symbol::new("BTCUSDT");
+    let sim = SimulatedExchange::new(
+        dec!(100000),
+        vec![instrument(&sym)],
+        CostModel {
+            maker_fee_rate: dec!(0.0002),
+        },
+    );
+
+    for (link, price) in [("low", dec!(96)), ("high", dec!(100)), ("mid", dec!(98))] {
+        sim.place_limit_entry(LimitEntry {
+            symbol: sym.clone(),
+            side: Side::Buy,
+            qty: dec!(1),
+            price,
+            order_link_id: link.into(),
+            stop_loss: price - dec!(5),
+            stop_limit_price: price - dec!(5),
+            take_profit: price + dec!(10),
+        })
+        .await
+        .expect("placed");
+    }
+
+    // Low enough to trade through every one of them.
+    sim.advance(&sym, &candle_at(0, dec!(101), dec!(90)), &[]);
+
+    let positions = sim.positions().await.expect("positions");
+    assert_eq!(positions.len(), 1, "one-way mode holds one position");
+    assert_eq!(
+        positions[0].entry_price,
+        dec!(100),
+        "price reaches the highest buy limit first, so that one fills"
+    );
+}
+
+#[tokio::test]
+async fn a_sell_side_pick_is_the_lowest_limit_price_reaches_first() {
+    let sym = Symbol::new("BTCUSDT");
+    let sim = SimulatedExchange::new(
+        dec!(100000),
+        vec![instrument(&sym)],
+        CostModel {
+            maker_fee_rate: dec!(0.0002),
+        },
+    );
+
+    for (link, price) in [("high", dec!(104)), ("low", dec!(100)), ("mid", dec!(102))] {
+        sim.place_limit_entry(LimitEntry {
+            symbol: sym.clone(),
+            side: Side::Sell,
+            qty: dec!(1),
+            price,
+            order_link_id: link.into(),
+            stop_loss: price + dec!(5),
+            stop_limit_price: price + dec!(5),
+            take_profit: price - dec!(10),
+        })
+        .await
+        .expect("placed");
+    }
+
+    sim.advance(&sym, &candle_at(0, dec!(110), dec!(99)), &[]);
+
+    let positions = sim.positions().await.expect("positions");
+    assert_eq!(positions.len(), 1);
+    assert_eq!(
+        positions[0].entry_price,
+        dec!(100),
+        "price rises through the lowest sell limit first"
+    );
+}
+
+fn entry_at(link: &str, side: Side, price: rust_decimal::Decimal) -> LimitEntry {
+    LimitEntry {
+        symbol: Symbol::new("BTCUSDT"),
+        side,
+        qty: dec!(1),
+        price,
+        order_link_id: link.into(),
+        stop_loss: price,
+        stop_limit_price: price,
+        take_profit: price,
+    }
+}
+
+#[test]
+fn fill_priority_is_deterministic_on_a_plain_slice() {
+    // Tested on a Vec, NOT through the exchange's HashMap. Driving this rule
+    // through the map made the test probabilistic — under the original bug it
+    // caught the defect only about two runs in three, because the buggy pick
+    // was random rather than wrong. A pure function has no such excuse.
+    let buys = [
+        entry_at("a", Side::Buy, dec!(96)),
+        entry_at("b", Side::Buy, dec!(100)),
+        entry_at("c", Side::Buy, dec!(98)),
+    ];
+
+    // Every ordering of the same three orders must give the same answer.
+    for perm in [
+        [0, 1, 2],
+        [2, 1, 0],
+        [1, 0, 2],
+        [0, 2, 1],
+        [2, 0, 1],
+        [1, 2, 0],
+    ] {
+        let mut v: Vec<&LimitEntry> = perm.iter().map(|i| &buys[*i]).collect();
+        let picked = backtest::best_fillable(&mut v).expect("a candidate");
+        assert_eq!(
+            picked.price,
+            dec!(100),
+            "price reaches the highest buy limit first, whatever order they arrive in"
+        );
+    }
+
+    let sells = [
+        entry_at("a", Side::Sell, dec!(104)),
+        entry_at("b", Side::Sell, dec!(100)),
+        entry_at("c", Side::Sell, dec!(102)),
+    ];
+    for perm in [[0, 1, 2], [2, 1, 0], [1, 0, 2]] {
+        let mut v: Vec<&LimitEntry> = perm.iter().map(|i| &sells[*i]).collect();
+        assert_eq!(
+            backtest::best_fillable(&mut v).expect("a candidate").price,
+            dec!(100),
+            "price rises through the lowest sell limit first"
+        );
+    }
+}
+
+#[test]
+fn equal_prices_break_the_tie_on_link_id() {
+    // Two orders at the same price must still resolve identically every run,
+    // or the map ordering leaks back in through the tie.
+    let a = entry_at("aaa", Side::Buy, dec!(100));
+    let b = entry_at("zzz", Side::Buy, dec!(100));
+    for pair in [vec![&a, &b], vec![&b, &a]] {
+        let mut v = pair;
+        assert_eq!(
+            backtest::best_fillable(&mut v)
+                .expect("a candidate")
+                .order_link_id,
+            "aaa"
+        );
+    }
+}
+
+#[test]
+fn no_candidates_means_no_fill() {
+    let mut v: Vec<&LimitEntry> = Vec::new();
+    assert!(backtest::best_fillable(&mut v).is_none());
+}

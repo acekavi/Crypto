@@ -53,6 +53,25 @@ pub struct ClosedTrade {
     pub was_ambiguous: bool,
 }
 
+/// Order the candidates by which one price reaches FIRST: for a buy the
+/// highest limit, for a sell the lowest. Ties break on `order_link_id`.
+///
+/// Pure and public so the rule can be tested on a plain slice. Testing it only
+/// through `advance` meant testing it through a `HashMap`, whose iteration
+/// order is random per process — the original bug produced 255 trades on one
+/// run and 257 on the next, and a test driven through that map catches it only
+/// about two times in three.
+pub fn best_fillable<'a>(candidates: &mut Vec<&'a LimitEntry>) -> Option<&'a LimitEntry> {
+    candidates.sort_by(|a, b| {
+        let by_price = match a.side {
+            Side::Buy => b.price.cmp(&a.price),
+            Side::Sell => a.price.cmp(&b.price),
+        };
+        by_price.then_with(|| a.order_link_id.cmp(&b.order_link_id))
+    });
+    candidates.first().copied()
+}
+
 /// An open position plus the exit levels carried on the `LimitEntry` that
 /// opened it. `LimitEntry` already has `stop_limit_price` and `take_profit`,
 /// so no separate bookkeeping is needed to know where a position's exits sit.
@@ -220,17 +239,30 @@ impl SimulatedExchange {
         // second fill into an existing position is not something this task's
         // interface asks for.
         if !state.positions.contains_key(symbol) {
-            let fillable_link_id = state
+            // PRICE PRIORITY, and deterministic. `resting` is a HashMap, so
+            // iterating it to pick a fill made the choice depend on hash order
+            // — with two resting orders on one symbol the same backtest
+            // produced 255 trades on one run and 257 on the next. Every
+            // comparison the gate makes assumes reproducibility, so that had
+            // to go.
+            //
+            // Among the orders price actually traded through, the one it
+            // reached FIRST fills: for a buy that is the highest limit, for a
+            // sell the lowest. Ties break on `order_link_id`, which is
+            // deterministic by construction, so the result never depends on
+            // map ordering.
+            let mut fillable: Vec<&LimitEntry> = state
                 .resting
                 .values()
-                .find(|entry| &entry.symbol == symbol)
+                .filter(|entry| &entry.symbol == symbol)
                 .filter(|entry| {
                     matches!(
                         limit_fill(entry.side, entry.price, candle),
                         crate::fills::FillOutcome::Filled { .. }
                     )
                 })
-                .map(|entry| entry.order_link_id.clone());
+                .collect();
+            let fillable_link_id = best_fillable(&mut fillable).map(|e| e.order_link_id.clone());
 
             if let Some(link_id) = fillable_link_id {
                 let entry = state.resting.remove(&link_id).expect("just matched");
