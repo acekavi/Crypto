@@ -17,6 +17,10 @@ engine = { path = "../engine" }
 # together, and that wiring is exactly what this crate must replay unchanged.
 bot = { path = "../../bot" }
 async-trait = "0.1"
+indicators = { path = "../indicators" }
+# Seeded only. Every draw must be reproducible from a recorded seed, so no
+# thread_rng anywhere in this crate.
+rand = "0.9"
 rust_decimal.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
