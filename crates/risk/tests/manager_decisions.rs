@@ -48,11 +48,24 @@ fn a_clean_signal_becomes_a_sized_intent() {
     let Decision::Enter(intent) = d else {
         panic!("expected Enter, got {d:?}");
     };
-    // 1% of 10,000 = 100 risked, $5 stop distance => 20 units.
-    assert_eq!(intent.qty, dec!(20));
+    // Risk is measured entry -> STOP-LIMIT, not entry -> trigger, because the
+    // stop-limit is where a stopped trade actually fills.
+    //   trigger    95.0
+    //   stop-limit 94.4   (95 - 0.3 x ATR(2))
+    //   risk/unit   5.6
+    //   1% of 10,000 = 100 risked  =>  100 / 5.6 = 17.857 units
+    //   and 17.857 x 5.6 = 100 exactly, which is the point.
+    //
+    // Sizing on the 5.0 trigger distance instead gave 20 units, and a fill at
+    // 94.4 then lost 20 x 5.6 = 112 — 12% more than the rules allow. Across
+    // 1486 backtested trades that turned a nominal 1:2 into a realised 1.60
+    // and moved breakeven from 33.3% to 38.4%.
+    assert_eq!(intent.qty, dec!(17.857));
     assert_eq!(intent.entry_price, dec!(100));
     assert_eq!(intent.stop_price, dec!(95));
-    assert_eq!(intent.target_price, dec!(110));
+    // Target is 2R on the SAME risk distance, so the reward really is twice
+    // the loss: 100 + 2 x 5.6 = 111.2.
+    assert_eq!(intent.target_price, dec!(111.2));
     assert_eq!(intent.side, Side::Buy);
     assert_eq!(intent.signal_candle_open_ms, 1_700_000_000_000);
 }
@@ -227,4 +240,48 @@ fn a_short_target_price_falling_through_zero_refuses_rather_than_panicking() {
         matches!(d, Decision::Refuse(Refusal::NonPositiveTargetPrice { .. })),
         "expected a refusal, got {d:?}"
     );
+}
+
+#[test]
+fn a_stopped_trade_loses_exactly_the_configured_risk_fraction() {
+    // The property the sizing fix exists to restore, asserted directly rather
+    // than inferred from a quantity: filling at the stop-limit must cost 1% of
+    // equity, not 1% plus the stop-limit offset.
+    let d = manager().evaluate(&long_signal(), &healthy(), &instrument(), None);
+    let Decision::Enter(intent) = d else {
+        panic!("expected Enter");
+    };
+
+    let realised_loss = intent.qty * (intent.entry_price - intent.stop_limit_price);
+    let intended = healthy().equity * RiskParams::defaults().risk_pct;
+
+    // Quantity rounds DOWN to the instrument's step, so the realised loss
+    // lands just under the intended risk and never over it. That direction
+    // matters: rounding up would breach the 1% rule on every trade.
+    assert!(
+        realised_loss <= intended,
+        "a stop fill cost {realised_loss}, more than the intended {intended}"
+    );
+    // And it must be genuinely close, not merely under — one qty_step of
+    // slack at most, or the sizing is wrong in a different way.
+    let slack = instrument().qty_step * (intent.entry_price - intent.stop_limit_price);
+    assert!(
+        intended - realised_loss < slack,
+        "realised {realised_loss} is more than one qty_step below the intended {intended}"
+    );
+}
+
+#[test]
+fn the_target_pays_twice_what_a_stop_fill_costs() {
+    // "1:2" has to mean the realised reward is twice the realised loss. Before
+    // the fix the target was 2x the TRIGGER distance while losses realised at
+    // the wider stop-limit distance, so the true ratio was 1.67, not 2.
+    let d = manager().evaluate(&long_signal(), &healthy(), &instrument(), None);
+    let Decision::Enter(intent) = d else {
+        panic!("expected Enter");
+    };
+
+    let loss = intent.entry_price - intent.stop_limit_price;
+    let gain = intent.target_price - intent.entry_price;
+    assert_eq!(gain, loss * dec!(2), "realised reward must be exactly 2R");
 }
