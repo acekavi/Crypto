@@ -146,6 +146,46 @@ async fn an_expired_resting_order_is_cancelled_on_a_later_candle() {
 }
 
 #[tokio::test]
+async fn a_fatal_cancel_failure_on_an_expired_order_halts_instead_of_being_swallowed() {
+    use botcore::{ErrorClass, Side};
+    use engine::RestingOrder;
+    use exchange::bybit::transport::ExchangeError;
+
+    // 10004 is Bybit's "bad sign" retCode, which classifies Fatal. A revoked
+    // or invalid key means every subsequent exchange call is doomed the same
+    // way, so cancelling an expired entry must propagate this rather than
+    // being logged and skipped like an ordinary cancel failure.
+    let fatal = ExchangeError::Api {
+        code: 10004,
+        msg: "bad sign".into(),
+    };
+    assert_eq!(fatal.class(), ErrorClass::Fatal);
+
+    let mock = Arc::new(MockExchange::new().fail_cancel_always(fatal));
+    let (mut el, _d) = loop_with(mock.clone()).await;
+
+    el.track_for_test(RestingOrder {
+        link_id: "old".into(),
+        symbol: Symbol::new("BTCUSDT"),
+        side: Side::Buy,
+        qty: dec!(1),
+        cum_exec_qty: Decimal::ZERO,
+        placed_at_candle_ms: 0,
+    });
+
+    let err = el
+        .on_candle_closed(&Symbol::new("BTCUSDT"), Timeframe::H1, &candle(3 * H1))
+        .await
+        .expect_err("a Fatal cancel failure must propagate, not be swallowed");
+
+    assert_eq!(err.class(), ErrorClass::Fatal);
+    assert!(
+        mock.cancelled().is_empty(),
+        "a failed cancel must not be recorded as cancelled"
+    );
+}
+
+#[tokio::test]
 async fn an_account_event_marking_an_order_filled_stops_it_from_resting() {
     // Without EngineLoop::on_account_event feeding the private feed into the
     // tracker, the tracker never learns a resting entry filled: it would

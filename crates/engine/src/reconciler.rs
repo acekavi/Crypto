@@ -1,4 +1,4 @@
-use botcore::Symbol;
+use botcore::{ErrorClass, Symbol};
 use exchange::ExchangeClient;
 use exchange::bybit::transport::ExchangeError;
 use tracing::{info, warn};
@@ -55,6 +55,16 @@ pub async fn reconcile(
             {
                 Ok(()) => report.cancelled_stale.push(order.order_link_id),
                 Err(e) => {
+                    // A Fatal cancel failure (revoked key, bad signature) means
+                    // the API key itself cannot be trusted for trading, and
+                    // this runs at startup — before any strategy evaluation —
+                    // so masking it here would let a partial-permission key
+                    // (read works, trade revoked) look healthy through the
+                    // very first reconcile. Propagate so the process halts,
+                    // exactly like every other Fatal exchange error.
+                    if e.class() == ErrorClass::Fatal {
+                        return Err(e);
+                    }
                     // Leave it unadopted. It will be seen again on the next
                     // reconcile rather than silently managed as if fresh.
                     warn!(link_id = %order.order_link_id, error = %e, "cancelling a stale order failed");

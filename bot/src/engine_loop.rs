@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use botcore::{Candle, Instrument, OrderState, Side, Symbol, Timeframe};
+use botcore::{Candle, ErrorClass, Instrument, OrderState, Side, Symbol, Timeframe};
 use engine::{
     Acceptance, CandleStore, EscalationAction, EscalationLadder, Executor, JournalFacts,
     OrderTracker, RestingOrder, TrackerAction, TriggeredStop, assemble_account_state,
@@ -453,6 +453,14 @@ impl EngineLoop {
             } = action;
             info!(%sym, %link_id, %filled, "entry expired; cancelling the remainder");
             if let Err(e) = self.executor.cancel(&sym, &link_id).await {
+                // A revoked/invalid key (Fatal) means every subsequent call in
+                // this process is doomed the same way, so it must halt rather
+                // than be logged and skipped like an ordinary cancel failure —
+                // mirrors the same class check the caller in main.rs applies
+                // to this function's own Err.
+                if e.class() == ErrorClass::Fatal {
+                    return Err(e);
+                }
                 warn!(%link_id, error = %e, "cancelling an expired entry failed");
             }
         }

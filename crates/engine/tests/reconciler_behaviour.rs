@@ -1,4 +1,4 @@
-use botcore::{OpenOrder, OrderState, Position, Side, Symbol};
+use botcore::{ErrorClass, OpenOrder, OrderState, Position, Side, Symbol};
 use engine::OrderTracker;
 use engine::mock::MockExchange;
 use engine::reconciler::reconcile;
@@ -220,5 +220,37 @@ async fn a_failed_cancel_does_not_stop_other_orders_being_processed() {
 
     assert_eq!(report.adopted_orders, vec!["fresh".to_string()]);
     assert!(tracker.is_resting("fresh"));
+    assert!(!tracker.is_resting("stubborn"));
+}
+
+#[tokio::test]
+async fn a_fatal_cancel_failure_halts_reconciliation_instead_of_being_swallowed() {
+    // This runs at startup, before any strategy evaluation, so a Fatal cancel
+    // failure (revoked key, bad signature) must propagate rather than be
+    // logged and skipped like an ordinary cancel failure — otherwise a
+    // partial-permission API key (read works, trade revoked) would look
+    // healthy through the very first reconcile.
+    //
+    // 10004 is Bybit's "bad sign" retCode. Assert it actually classifies
+    // Fatal so this test cannot silently degrade into exercising the
+    // Rejected/Retryable path if the classification table ever drifts.
+    let fatal = exchange::bybit::transport::ExchangeError::Api {
+        code: 10004,
+        msg: "bad sign".into(),
+    };
+    assert_eq!(fatal.class(), ErrorClass::Fatal);
+
+    let mock = MockExchange::new()
+        .with_open_orders(vec![open_order("stubborn", NOW - 10 * H1)])
+        .fail_cancel_always(fatal);
+    let mut tracker = OrderTracker::new(3);
+
+    let err = reconcile(&mock, &mut tracker, NOW, 3 * H1)
+        .await
+        .expect_err("a Fatal cancel failure must propagate as Err, not be swallowed");
+    assert_eq!(err.class(), ErrorClass::Fatal);
+
+    // Left in neither bucket: reconcile bailed out before recording anything
+    // about this order, exactly as an unadopted stale order must be.
     assert!(!tracker.is_resting("stubborn"));
 }
