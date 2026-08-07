@@ -51,11 +51,22 @@ fn parameter_grid() -> Vec<StrategyParams> {
 struct Args {
     db_path: String,
     starting_equity: Decimal,
+    /// Days at the END of history reserved for a single final validation.
+    ///
+    /// Research runs must never see these. Repeatedly testing ideas against
+    /// the same data until one passes is how a backtest is talked into
+    /// agreeing with you; holding a block back is the only cheap defence.
+    holdout_days: i64,
+    /// Run ON the reserved block instead of excluding it. For the ONE
+    /// validation run, after the research is finished and frozen.
+    holdout_only: bool,
 }
 
 fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     let mut db_path = "data/history.db".to_string();
     let mut starting_equity = Decimal::from(10_000);
+    let mut holdout_days = 0i64;
+    let mut holdout_only = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -67,12 +78,24 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
                     .parse::<Decimal>()
                     .map_err(|_| format!("--equity value \"{v}\" is not a number"))?;
             }
+            "--holdout-days" => {
+                let v = args.next().ok_or("--holdout-days requires a value")?;
+                holdout_days = v
+                    .parse::<i64>()
+                    .map_err(|_| format!("--holdout-days value \"{v}\" is not an integer"))?;
+            }
+            "--holdout-only" => holdout_only = true,
             other => return Err(format!("unrecognised argument: {other}").into()),
         }
+    }
+    if holdout_only && holdout_days <= 0 {
+        return Err("--holdout-only requires --holdout-days".into());
     }
     Ok(Args {
         db_path,
         starting_equity,
+        holdout_days,
+        holdout_only,
     })
 }
 
@@ -136,8 +159,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The replay needs BOTH timeframes present for every symbol, since the
     // strategy declares H1 and H4.
-    let start_ms = stored.iter().map(|(_, _, e, _)| *e).max().unwrap_or(0);
-    let end_ms = stored.iter().map(|(_, _, _, l)| *l).min().unwrap_or(0);
+    let full_start = stored.iter().map(|(_, _, e, _)| *e).max().unwrap_or(0);
+    let full_end = stored.iter().map(|(_, _, _, l)| *l).min().unwrap_or(0);
+
+    // The reserved block sits at the END of history, so research always runs
+    // on the earlier period and validation on genuinely unseen data.
+    let split_ms = full_end - args.holdout_days * 86_400_000;
+    let (start_ms, end_ms) = if args.holdout_only {
+        (split_ms, full_end)
+    } else if args.holdout_days > 0 {
+        (full_start, split_ms)
+    } else {
+        (full_start, full_end)
+    };
 
     let cfg = BacktestConfig {
         start_ms,
@@ -164,6 +198,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         wf.out_of_sample_ms / 86_400_000
     );
     println!("folds        : {}", available.len());
+    println!(
+        "data segment : {}",
+        if args.holdout_only {
+            "HELD-OUT BLOCK — this is the one validation run"
+        } else if args.holdout_days > 0 {
+            "RESEARCH ONLY — the held-out block is excluded"
+        } else {
+            "FULL HISTORY — no block reserved"
+        }
+    );
 
     if available.is_empty() {
         println!("\n---------------- VERDICT: FAIL ----------------");
