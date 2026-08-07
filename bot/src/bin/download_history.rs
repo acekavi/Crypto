@@ -122,8 +122,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut total_candles_written = 0usize;
     let mut total_gaps = 0usize;
+    let mut total_funding_rows = 0usize;
 
     for symbol in &args.symbols {
+        // Funding first: a backtest that finds no funding rows charges ZERO
+        // funding and silently understates the cost of every multi-day hold,
+        // which is exactly what this strategy does. `SimulatedExchange` reads
+        // these from the database, so an empty table looks identical to a
+        // market with no funding at all.
+        match rest.funding_history(symbol, start_ms, end_ms).await {
+            Ok(rates) => {
+                db.insert_funding(&rates).await?;
+                total_funding_rows += rates.len();
+                info!(%symbol, rows = rates.len(), "funding history stored");
+            }
+            // Not fatal: candles are still worth having, and the backtest
+            // reports its own funding total so a zero is visible there too.
+            Err(e) => warn!(%symbol, error = %e, "funding history download failed"),
+        }
+
         for &tf in &TIMEFRAMES {
             let report = download_symbol(&rest, &db, symbol, tf, start_ms, end_ms).await?;
             info!(
@@ -148,9 +165,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         symbols = args.symbols.len(),
         candles_written = total_candles_written,
+        funding_rows = total_funding_rows,
         gaps = total_gaps,
         "historical download complete"
     );
+    if total_funding_rows == 0 {
+        error!(
+            "no funding rows stored — a backtest over this data would charge zero \
+             funding and understate the cost of every position held across an 8h period"
+        );
+    }
     if total_gaps > 0 {
         error!(
             gaps = total_gaps,
