@@ -13,8 +13,8 @@ use super::rate_limit::RateLimiter;
 use super::sign::{ClockOffset, Credentials, local_now_ms, sign_rest};
 use super::transport::{ExchangeError, backoff_delay};
 use super::wire::{
-    Envelope, InstrumentRow, KlineResult, ListResult, OpenOrderRow, OrderCreateResult, PositionRow,
-    Ticker, TickerRow, WalletRow,
+    Envelope, InstrumentRow, KlineResult, KlineRow, ListResult, OpenOrderRow, OrderCreateResult,
+    PositionRow, Ticker, TickerRow, WalletRow,
 };
 use crate::traits::ExchangeClient;
 
@@ -22,6 +22,12 @@ const RECV_WINDOW: u32 = 5_000;
 const MAX_ATTEMPTS: u32 = 5;
 const BACKOFF_BASE_MS: u64 = 200;
 const BACKOFF_JITTER: f64 = 0.25;
+
+// Confirmed live against api-testnet.bybit.com/v5/market/kline (2026-08-07):
+// requesting limit=1001 or limit=2000 both still return exactly 1000 rows
+// with retCode 0 — the server silently clamps rather than rejecting, so 1000
+// is the real per-page ceiling.
+const KLINE_PAGE_LIMIT: u16 = 1000;
 
 /// Bybit V5 REST client.
 ///
@@ -182,6 +188,120 @@ impl BybitRest {
             last: Box::new(last.expect("loop ran at least once")),
         })
     }
+
+    /// Fetches every candle in `[start_ms, end_ms]`, paging through Bybit's
+    /// kline endpoint as needed.
+    ///
+    /// Deliberately **not** on `ExchangeClient` — see that trait's doc
+    /// comment. A historical range download is an inherent capability of the
+    /// real REST client, not something `SimulatedExchange` (Phase 2b) has any
+    /// business implementing.
+    ///
+    /// Confirmed live against `api-testnet.bybit.com/v5/market/kline`
+    /// (2026-08-07, via `curl`): the `list` comes back **newest first** — for
+    /// `interval=60`, `open_time_ms` strictly decreases through the array —
+    /// and `start`/`end` are inclusive-range query params in epoch
+    /// milliseconds. This confirms what `klines`'s post-fetch ascending sort
+    /// already implied. `limit` is silently clamped to 1000 (see
+    /// `KLINE_PAGE_LIMIT`), never rejected.
+    ///
+    /// Reuses `self.get`, so every page goes through the same rate limiter
+    /// and retry/backoff as every other endpoint — no second HTTP path.
+    pub async fn klines_range(
+        &self,
+        symbol: &Symbol,
+        tf: Timeframe,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        let symbol = symbol.clone();
+        let interval = tf.as_bybit_interval().to_string();
+        walk_kline_pages(start_ms, end_ms, |page_start, page_end| {
+            let symbol = symbol.clone();
+            let interval = interval.clone();
+            async move {
+                let res: KlineResult = self
+                    .get(
+                        "/v5/market/kline",
+                        &[
+                            ("category", "linear".into()),
+                            ("symbol", symbol.as_str().to_string()),
+                            ("interval", interval),
+                            ("start", page_start.to_string()),
+                            ("end", page_end.to_string()),
+                            ("limit", KLINE_PAGE_LIMIT.to_string()),
+                        ],
+                    )
+                    .await?;
+                res.list.into_iter().map(KlineRow::into_candle).collect()
+            }
+        })
+        .await
+    }
+}
+
+/// Pure page-walking logic behind `klines_range`, independent of HTTP so it
+/// can be driven by a fake `fetch` in tests without touching the network.
+///
+/// `fetch(page_start, page_end)` must behave like Bybit: return candles in
+/// `[page_start, page_end]` **newest first**. The walk starts with
+/// `page_end = end_ms` and, after each non-empty page, moves `page_end` to
+/// just before the oldest candle that page returned — i.e. it pages
+/// backward through time, matching the API's own ordering.
+///
+/// Stops when:
+/// - a page comes back empty,
+/// - the oldest candle received reaches `start_ms` (the range is covered), or
+/// - **a page fails to move the cursor backward at all** — collected so far
+///   is returned and a warning logged, rather than retrying the same window
+///   forever against a rate-limited API.
+///
+/// Deduplicates by `open_time_ms` (overlapping pages are normal), drops
+/// anything outside `[start_ms, end_ms]`, and returns ascending.
+pub async fn walk_kline_pages<F, Fut>(
+    start_ms: i64,
+    end_ms: i64,
+    mut fetch: F,
+) -> Result<Vec<Candle>, ExchangeError>
+where
+    F: FnMut(i64, i64) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Candle>, ExchangeError>>,
+{
+    let mut collected: Vec<Candle> = Vec::new();
+    let mut cursor_end = end_ms;
+
+    loop {
+        let page = fetch(start_ms, cursor_end).await?;
+        if page.is_empty() {
+            break;
+        }
+
+        let page_oldest = page
+            .iter()
+            .map(|c| c.open_time_ms)
+            .min()
+            .expect("checked non-empty above");
+        collected.extend(page);
+
+        if page_oldest <= start_ms {
+            break;
+        }
+
+        let next_cursor = page_oldest - 1;
+        if next_cursor >= cursor_end {
+            warn!(
+                cursor_end,
+                "kline page fetch did not advance the cursor; stopping instead of looping forever"
+            );
+            break;
+        }
+        cursor_end = next_cursor;
+    }
+
+    collected.retain(|c| c.open_time_ms >= start_ms && c.open_time_ms <= end_ms);
+    collected.sort_by_key(|c| c.open_time_ms);
+    collected.dedup_by_key(|c| c.open_time_ms);
+    Ok(collected)
 }
 
 // Endpoint methods live here and nowhere else — there are no inherent
