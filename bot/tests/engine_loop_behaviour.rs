@@ -620,3 +620,107 @@ async fn a_drawdown_refusal_persists_a_halt_that_a_fresh_engine_loop_then_sees()
         "a fresh EngineLoop must see the halt the first one persisted"
     );
 }
+
+/// Counts how many candles it was fed, so a test can prove `warm` reaches the
+/// strategy at all rather than only filling the candle store.
+struct CountingStrategy {
+    timeframes: Vec<Timeframe>,
+    seen: std::sync::Arc<std::sync::Mutex<usize>>,
+}
+
+impl strategy::Strategy for CountingStrategy {
+    fn timeframes(&self) -> &[Timeframe] {
+        &self.timeframes
+    }
+
+    fn warmup_candles(&self) -> usize {
+        250
+    }
+
+    fn on_candle_close(&mut self, _ctx: &strategy::MarketContext) -> Option<strategy::Signal> {
+        *self.seen.lock().expect("lock") += 1;
+        None
+    }
+}
+
+#[tokio::test]
+async fn warm_feeds_the_strategys_indicators_not_only_the_candle_store() {
+    // THE BUG THIS GUARDS. `Strategy::warmup_candles`'s contract says the
+    // engine warms indicators with that much history after a restart. For a
+    // long time only the CandleStore was seeded, so the store reported warm,
+    // every gate passed, and the strategy ran on cold EMAs — silent for about
+    // five weeks of live trading after each restart, logged as a healthy
+    // startup. Nothing observed it because a strategy returning None looks
+    // exactly like a market with no setups.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let journal = Arc::new(
+        Journal::open_local(dir.path().join("w.db").to_str().unwrap())
+            .await
+            .expect("journal"),
+    );
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let mock = Arc::new(MockExchange::new());
+
+    let mut el = EngineLoop::new(
+        Box::new(CountingStrategy {
+            timeframes: vec![Timeframe::H1],
+            seen: seen.clone(),
+        }),
+        RiskManager::new(RiskParams::defaults(), dec!(0.3)),
+        mock,
+        journal,
+        vec![instrument()],
+        "cfg".into(),
+        3,
+        250,
+    );
+
+    let sym = Symbol::new("BTCUSDT");
+    let history: Vec<Candle> = (0..300).map(|i| candle(i * H1)).collect();
+    el.warm(&sym, Timeframe::H1, history);
+
+    assert_eq!(
+        *seen.lock().expect("lock"),
+        300,
+        "every warm-up candle must reach the strategy, not just the store"
+    );
+}
+
+#[tokio::test]
+async fn warming_an_unknown_symbol_still_seeds_the_store_without_panicking() {
+    // No instrument metadata means no MarketContext can be built. The store
+    // must still be seeded so staleness and warmth stay correct; the symbol
+    // is refused later as UnknownInstrument, so nothing trades on it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let journal = Arc::new(
+        Journal::open_local(dir.path().join("w2.db").to_str().unwrap())
+            .await
+            .expect("journal"),
+    );
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let mock = Arc::new(MockExchange::new());
+
+    let mut el = EngineLoop::new(
+        Box::new(CountingStrategy {
+            timeframes: vec![Timeframe::H1],
+            seen: seen.clone(),
+        }),
+        RiskManager::new(RiskParams::defaults(), dec!(0.3)),
+        mock,
+        journal,
+        vec![instrument()],
+        "cfg".into(),
+        3,
+        250,
+    );
+
+    let unknown = Symbol::new("NOSUCHUSDT");
+    let history: Vec<Candle> = (0..10).map(|i| candle(i * H1)).collect();
+    el.warm(&unknown, Timeframe::H1, history);
+
+    assert_eq!(
+        *seen.lock().expect("lock"),
+        0,
+        "no instrument means no context, so the strategy is not fed"
+    );
+}

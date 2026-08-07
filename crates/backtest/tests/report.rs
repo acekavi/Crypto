@@ -40,6 +40,7 @@ fn wins_and_losses_are_counted_by_net_pnl_sign() {
         final_equity: dec!(10050),
         ambiguous_exits: 0,
         candles_replayed: 10,
+        halt_events: 0,
     };
 
     let summary = summarise(&result);
@@ -61,6 +62,7 @@ fn fees_and_funding_are_never_netted_away_from_net_pnl() {
         final_equity: dec!(10014),
         ambiguous_exits: 1,
         candles_replayed: 4,
+        halt_events: 0,
     };
 
     let summary = summarise(&result);
@@ -94,6 +96,7 @@ fn ambiguous_exits_is_carried_through_from_the_result_not_recomputed() {
         final_equity: dec!(10001),
         ambiguous_exits: 7,
         candles_replayed: 1,
+        halt_events: 0,
     };
 
     assert_eq!(summarise(&result).ambiguous_exits, 7);
@@ -106,6 +109,7 @@ fn an_empty_result_summarises_to_all_zeros() {
         final_equity: dec!(10000),
         ambiguous_exits: 0,
         candles_replayed: 0,
+        halt_events: 0,
     };
 
     assert_eq!(

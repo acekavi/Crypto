@@ -15,7 +15,7 @@ use exchange::ExchangeClient;
 use exchange::bybit::wire::FundingRate;
 use history::{HistoryDb, find_gaps};
 use persistence::Journal;
-use risk::RiskManager;
+use risk::{HaltPolicy, RiskManager};
 use rust_decimal::Decimal;
 use strategy::Strategy;
 
@@ -68,6 +68,10 @@ impl From<history::HistoryError> for BacktestError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacktestResult {
+    /// Drawdown breaches observed. Under the backtest's `RecordOnly` policy
+    /// these did NOT stop trading — they are reported so a run that spends
+    /// time past its risk limit cannot look identical to one that never did.
+    pub halt_events: usize,
     pub trades: Vec<ClosedTrade>,
     pub final_equity: Decimal,
     pub ambiguous_exits: usize,
@@ -131,6 +135,7 @@ pub async fn run_backtest(
     risk: RiskManager,
 ) -> Result<BacktestResult, BacktestError> {
     let timeframes = strategy.timeframes().to_vec();
+    let strategy_warmup = strategy.warmup_candles();
     let finest = timeframes.iter().copied().min_by_key(|tf| tf.duration_ms());
 
     let sim = Arc::new(SimulatedExchange::new(
@@ -151,7 +156,11 @@ pub async fn run_backtest(
 
     let mut engine = EngineLoop::new(
         strategy,
-        risk,
+        // Measurement, not operation: a latched halt would truncate the very
+        // sample the trade-count threshold demands. Halts are counted and
+        // reported instead. Live trading is unaffected — `HaltPolicy::Enforce`
+        // remains the default everywhere else.
+        risk.with_halt_policy(HaltPolicy::RecordOnly),
         client,
         journal,
         cfg.instruments.clone(),
@@ -162,6 +171,10 @@ pub async fn run_backtest(
         cfg.entry_expiry_candles,
         cfg.warmup_candles,
     );
+
+    // Enough to satisfy BOTH the candle store's window and the strategy's own
+    // indicators, whichever is longer.
+    let warmup_candles_needed = cfg.warmup_candles.max(strategy_warmup);
 
     let mut ticks: Vec<ReplayTick> = Vec::new();
     let mut funding_by_symbol: HashMap<Symbol, Vec<FundingRate>> = HashMap::new();
@@ -180,13 +193,21 @@ pub async fn run_backtest(
                 });
             }
 
-            // Mirrors main.rs's startup call before it begins streaming live
-            // candles. There is no separate pre-history window here — the
-            // replay range IS the whole available history — so this seeds an
-            // empty stream; `CandleStore::accept` (driven by `on_candle_closed`
-            // below) is what actually builds up the warm-up window, one
-            // replayed candle at a time, exactly as `test 3` requires.
-            engine.warm(symbol, tf, Vec::new());
+            // Warm from history BEFORE the measured window, exactly as
+            // main.rs warms from `klines()` before it starts streaming.
+            //
+            // This previously seeded an empty stream and let the window warm
+            // itself, which quietly made short windows unmeasurable: with a
+            // 200-period EMA on 4h the strategy produced nothing for its first
+            // ~75 days, so a 60-day out-of-sample window could never contain a
+            // single trade and reported zero as though that were a result.
+            // Warm-up candles are drawn from OUTSIDE `[start_ms, end_ms)`, so
+            // they inform indicators without becoming tradeable bars.
+            let warm_span = warmup_candles_needed as i64 * tf.duration_ms();
+            let warm = db
+                .candles_in_range(symbol, tf, cfg.start_ms - warm_span, cfg.start_ms - 1)
+                .await?;
+            engine.warm(symbol, tf, warm);
 
             for candle in candles {
                 ticks.push(ReplayTick {
@@ -250,6 +271,7 @@ pub async fn run_backtest(
         final_equity: balance,
         ambiguous_exits,
         candles_replayed,
+        halt_events: engine.halt_events(),
     })
 }
 

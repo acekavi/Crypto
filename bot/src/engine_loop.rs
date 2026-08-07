@@ -83,6 +83,11 @@ pub struct EngineLoop {
     /// every tick the ladder stays exhausted.
     halted_for_exhaustion: HashSet<Symbol>,
     ladder: EscalationLadder,
+    /// Drawdown breaches observed. Under `HaltPolicy::Enforce` each of these
+    /// also refused the entry; under `RecordOnly` (backtests) they were only
+    /// counted, so a run can report how often its safety net would have
+    /// engaged without the halt truncating the sample.
+    halt_events: usize,
 }
 
 impl EngineLoop {
@@ -117,11 +122,46 @@ impl EngineLoop {
             triggered_stops: HashMap::new(),
             halted_for_exhaustion: HashSet::new(),
             ladder: EscalationLadder::defaults(),
+            halt_events: 0,
         }
     }
 
-    /// Seed the store after a restart or a gap backfill.
+    /// How many drawdown breaches this run observed.
+    pub fn halt_events(&self) -> usize {
+        self.halt_events
+    }
+
+    /// Seed the store AND the strategy's indicators after a restart or a gap
+    /// backfill.
+    ///
+    /// Feeding the strategy matters as much as filling the store, and for a
+    /// long time it did not happen. `Strategy::warmup_candles`'s own contract
+    /// says "the engine warms indicators with this much history after a
+    /// restart", but only the store was ever seeded. The store then reported
+    /// warm immediately, every gate passed, and the strategy was called with
+    /// cold EMAs — returning `None` until it had seen its own warm-up worth of
+    /// live candles. For a 200-period EMA on 4h that is roughly five weeks of
+    /// silence after every restart, logged as a healthy startup.
+    ///
+    /// Signals produced while warming are discarded: they describe setups that
+    /// completed in the past, and acting on them would be trading history.
     pub fn warm(&mut self, symbol: &Symbol, tf: Timeframe, candles: Vec<Candle>) {
+        if let Some(instrument) = self.instruments.get(symbol.as_str()).cloned() {
+            for candle in &candles {
+                let _ = self.strategy.on_candle_close(&MarketContext {
+                    symbol,
+                    timeframe: tf,
+                    candle,
+                    instrument: &instrument,
+                });
+            }
+        } else {
+            // Without instrument metadata no `MarketContext` can be built. The
+            // store is still seeded so staleness and warmth stay correct, and
+            // `on_candle_closed` already refuses this symbol with
+            // `UnknownInstrument`, so nothing trades on a cold strategy.
+            warn!(%symbol, ?tf, "no instrument metadata; strategy indicators not warmed");
+        }
         self.store.warm(symbol, tf, candles);
     }
 
@@ -504,6 +544,10 @@ impl EngineLoop {
             .iter()
             .find(|p| p.symbol.as_str() == symbol.as_str())
             .and_then(|p| p.liq_price);
+
+        if self.risk.would_halt(&state).is_some() {
+            self.halt_events += 1;
+        }
 
         match self.risk.evaluate(&signal, &state, &instrument, liq) {
             Decision::Refuse(refusal) => {

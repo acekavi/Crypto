@@ -36,10 +36,27 @@ pub enum Decision {
 ///
 /// Every hard limit the owner set is enforced here, and the strategy cannot
 /// reach around it — strategies emit prices, never quantities.
+/// Whether a halt stops trading or is merely observed.
+///
+/// `Enforce` is live behaviour and the default: a drawdown breach refuses
+/// entries and a persisted halt keeps refusing until a human clears it.
+///
+/// `RecordOnly` exists for BACKTESTS. A latched halt truncates the sample —
+/// in one measured run it silenced 84% of the available history — which makes
+/// a minimum-trade-count threshold self-defeating, since the halt destroys the
+/// very sample that threshold demands. Measuring the edge and operating the
+/// account are different jobs. Every other refusal still applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HaltPolicy {
+    Enforce,
+    RecordOnly,
+}
+
 pub struct RiskManager {
     params: RiskParams,
     /// Fraction of ATR the stop-limit sits beyond its trigger.
     stop_limit_offset_atr: Decimal,
+    halt_policy: HaltPolicy,
 }
 
 impl RiskManager {
@@ -47,6 +64,7 @@ impl RiskManager {
         RiskManager {
             params,
             stop_limit_offset_atr,
+            halt_policy: HaltPolicy::Enforce,
         }
     }
 
@@ -61,6 +79,23 @@ impl RiskManager {
     ///
     /// Checks run cheapest-and-most-certain first: the persisted halt and the
     /// counting limits before any arithmetic, then drawdown, then sizing.
+    /// Observe halts instead of enforcing them. Backtests only — never wire
+    /// this into the live bot.
+    pub fn with_halt_policy(mut self, policy: HaltPolicy) -> Self {
+        self.halt_policy = policy;
+        self
+    }
+
+    pub fn halt_policy(&self) -> HaltPolicy {
+        self.halt_policy
+    }
+
+    /// The drawdown breach that WOULD halt trading right now, regardless of
+    /// policy. Lets a backtest count and report halts it is not enforcing.
+    pub fn would_halt(&self, state: &AccountState) -> Option<Refusal> {
+        drawdown_breach(state, &self.params)
+    }
+
     pub fn evaluate(
         &self,
         signal: &Signal,
@@ -68,13 +103,22 @@ impl RiskManager {
         instrument: &Instrument,
         liq_price_estimate: Option<Decimal>,
     ) -> Decision {
+        let enforcing = self.halt_policy == HaltPolicy::Enforce;
+
         if let Err(refusal) = check_entry_allowed(state, &self.params, &signal.symbol) {
-            return Decision::Refuse(refusal);
+            // Under `RecordOnly` a persisted halt is measured, not obeyed.
+            // EVERY other refusal — daily cap, concurrency, one-per-symbol —
+            // still applies, because those shape the edge rather than guard
+            // the account.
+            let is_halt = matches!(refusal, Refusal::Halted { .. });
+            if enforcing || !is_halt {
+                return Decision::Refuse(refusal);
+            }
         }
 
         // Measure drawdown directly rather than waiting for the engine to have
         // persisted a halt flag — the flag is written after this fires.
-        if let Some(breach) = drawdown_breach(state, &self.params) {
+        if enforcing && let Some(breach) = drawdown_breach(state, &self.params) {
             return Decision::Refuse(breach);
         }
 
