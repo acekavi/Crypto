@@ -17,6 +17,7 @@ use history::HistoryDb;
 use risk::RiskParams;
 use rust_decimal::Decimal;
 use strategy::pullback::{PullbackStrategy, StrategyParams};
+use strategy::reversion::{ReversionParams, ReversionStrategy};
 
 /// Seeds for the random-entry benchmark. Fixed and recorded so a reported
 /// percentile can be reproduced exactly by anyone re-running this.
@@ -48,6 +49,36 @@ fn parameter_grid() -> Vec<StrategyParams> {
     ]
 }
 
+/// What the report actually needs, so the two studies — which carry different
+/// parameter types — can be summarised through one shape.
+struct FoldLine {
+    index: usize,
+    trades: usize,
+    expectancy: Decimal,
+    drawdown_pct: Decimal,
+}
+
+struct RunOutcome {
+    oos_metrics: backtest::metrics::Metrics,
+    fold_lines: Vec<FoldLine>,
+}
+
+fn summarise_folds<P>(r: &backtest::walk_forward::WalkForwardResult<P>) -> RunOutcome {
+    RunOutcome {
+        oos_metrics: r.oos_metrics.clone(),
+        fold_lines: r
+            .folds
+            .iter()
+            .map(|f| FoldLine {
+                index: f.fold.index,
+                trades: f.oos_metrics.trade_count,
+                expectancy: f.oos_metrics.expectancy,
+                drawdown_pct: f.oos_metrics.max_drawdown_pct,
+            })
+            .collect(),
+    }
+}
+
 struct Args {
     db_path: String,
     starting_equity: Decimal,
@@ -60,6 +91,12 @@ struct Args {
     /// Run ON the reserved block instead of excluding it. For the ONE
     /// validation run, after the research is finished and frozen.
     holdout_only: bool,
+    /// Which pre-registered study to run. `pullback` is the original
+    /// (failed) baseline; `reversion` sweeps the six declared variants.
+    study: String,
+    /// Restrict a reversion run to one named variant. Stage 2 uses this to
+    /// send exactly ONE variant to the holdout.
+    variant: Option<String>,
 }
 
 fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
@@ -67,6 +104,8 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     let mut starting_equity = Decimal::from(10_000);
     let mut holdout_days = 0i64;
     let mut holdout_only = false;
+    let mut study = "pullback".to_string();
+    let mut variant: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -85,17 +124,24 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
                     .map_err(|_| format!("--holdout-days value \"{v}\" is not an integer"))?;
             }
             "--holdout-only" => holdout_only = true,
+            "--study" => study = args.next().ok_or("--study requires a value")?,
+            "--variant" => variant = Some(args.next().ok_or("--variant requires a value")?),
             other => return Err(format!("unrecognised argument: {other}").into()),
         }
     }
     if holdout_only && holdout_days <= 0 {
         return Err("--holdout-only requires --holdout-days".into());
     }
+    if study != "pullback" && study != "reversion" {
+        return Err(format!("--study must be pullback or reversion, got {study:?}").into());
+    }
     Ok(Args {
         db_path,
         starting_equity,
         holdout_days,
         holdout_only,
+        study,
+        variant,
     })
 }
 
@@ -223,17 +269,116 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let grid = parameter_grid();
     let risk_params = RiskParams::defaults();
     let stop_offset = Decimal::new(3, 1);
+    let reversion = args.study == "reversion";
+
+    // Six declared variants means six chances to find noise, so the study
+    // raises its own benchmark bar and estimates it from more runs.
+    let thresholds = if reversion {
+        GateThresholds::mean_reversion_study()
+    } else {
+        GateThresholds::pre_registered()
+    };
+    let seed_count: u64 = if reversion { 500 } else { 100 };
 
     println!("\nrunning walk-forward over {} folds...", available.len());
-    let wf_result = run_walk_forward(&db, &cfg, &wf, &grid, &risk_params, stop_offset, &|p| {
-        Box::new(PullbackStrategy::new(p.clone()))
-    })
-    .await?;
+    // The reversion study sweeps its six declared variants and reports each,
+    // so a selection is made on evidence rather than on one number. Stage 2
+    // passes --variant to send exactly ONE of them to the holdout.
+    let (wf_result, chosen_label, grid_size) = if reversion {
+        let mut declared = ReversionParams::declared_variants();
+        if let Some(want) = &args.variant {
+            declared.retain(|(name, _)| name.eq_ignore_ascii_case(want));
+            if declared.is_empty() {
+                return Err(format!("unknown variant {:?}", args.variant).into());
+            }
+        }
+        // A variant whose 2R target sits past the mean would need price to
+        // overshoot the level it is reverting to. Refuse rather than quietly
+        // produce numbers for an incoherent setup.
+        for (name, p) in &declared {
+            if !p.target_lands_before_mean(stop_offset) {
+                return Err(format!("variant {name} targets past the mean; invalid").into());
+            }
+        }
 
-    let seeds: Vec<u64> = BENCHMARK_SEEDS.collect();
+        println!("study        : mean-reversion (pre-registered)");
+        println!("variants     : {}", declared.len());
+        println!(
+            "benchmark bar: p{} over {seed_count} seeds",
+            thresholds.benchmark_percentile
+        );
+
+        let n = declared.len();
+        let mut best: Option<(
+            String,
+            backtest::walk_forward::WalkForwardResult<ReversionParams>,
+        )> = None;
+        for (name, p) in &declared {
+            let r = run_walk_forward(
+                &db,
+                &cfg,
+                &wf,
+                std::slice::from_ref(p),
+                &risk_params,
+                stop_offset,
+                &|q| Box::new(ReversionStrategy::new(q.clone())),
+            )
+            .await?;
+            println!(
+                "  variant {name}: trades {:>5}  expectancy {:>12}  PF {:>8}  worstFoldDD {:>7}%",
+                r.oos_metrics.trade_count,
+                r.oos_metrics.expectancy.round_dp(4),
+                r.oos_metrics
+                    .profit_factor
+                    .map(|v| v.round_dp(3).to_string())
+                    .unwrap_or_else(|| "undef".into()),
+                r.oos_metrics.max_drawdown_pct.round_dp(2)
+            );
+
+            // Selection rule fixed in the spec: highest OOS expectancy among
+            // variants that produced at least the minimum trade count.
+            let eligible = r.oos_metrics.trade_count >= thresholds.min_trades;
+            let better = match &best {
+                None => eligible,
+                Some((_, b)) => eligible && r.oos_metrics.expectancy > b.oos_metrics.expectancy,
+            };
+            if better {
+                best = Some((name.to_string(), r));
+            }
+        }
+
+        match best {
+            Some((name, r)) => {
+                println!(
+                    "\nselected variant: {name} (highest OOS expectancy with >= {} trades)",
+                    thresholds.min_trades
+                );
+                (summarise_folds(&r), name, n)
+            }
+            None => {
+                println!("\n---------------- VERDICT: FAIL ----------------");
+                println!(
+                    "Reason: NO VARIANT reached {} out-of-sample trades.",
+                    thresholds.min_trades
+                );
+                println!("The study fails at stage 1 for insufficient signal frequency.");
+                println!("The holdout is NOT opened. No threshold was adjusted.");
+                return Ok(());
+            }
+        }
+    } else {
+        let grid = parameter_grid();
+        let n = grid.len();
+        let r = run_walk_forward(&db, &cfg, &wf, &grid, &risk_params, stop_offset, &|p| {
+            Box::new(PullbackStrategy::new(p.clone()))
+        })
+        .await?;
+        (summarise_folds(&r), "pullback".to_string(), n)
+    };
+
+    let seeds: Vec<u64> = (1..=seed_count).collect();
     println!(
         "running random-entry benchmark over {} seeds...",
         seeds.len()
@@ -251,7 +396,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let thresholds = GateThresholds::pre_registered();
     let verdict = evaluate(&wf_result.oos_metrics, &benchmark, &thresholds);
 
     // The verdict comes FIRST, before any supporting number, so a reader
@@ -301,19 +445,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n---- per fold (a result driven by one lucky fold is visible here) ----");
-    for f in &wf_result.folds {
+    for f in &wf_result.fold_lines {
         println!(
             "  fold {:>2}  trades {:>5}  expectancy {:>12}  maxDD {:>7}%",
-            f.fold.index,
-            f.oos_metrics.trade_count,
-            f.oos_metrics.expectancy.round_dp(4),
-            f.oos_metrics.max_drawdown_pct.round_dp(2)
+            f.index,
+            f.trades,
+            f.expectancy.round_dp(4),
+            f.drawdown_pct.round_dp(2)
         );
     }
 
     let sorted = benchmark.sorted_expectancies();
     println!("\n---- random-entry benchmark ----");
-    println!("  seeds             : {} (1..=100)", benchmark.seeds.len());
+    println!(
+        "  seeds             : {} (1..={seed_count})",
+        benchmark.seeds.len()
+    );
     println!("  signal probability: {}", benchmark_probability());
     println!(
         "  median            : {}",
@@ -329,8 +476,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  db            : {}", args.db_path);
     println!("  range         : {start_ms} .. {end_ms}");
     println!("  maker fee     : {maker_fee_rate}");
-    println!("  grid entries  : {}", grid.len());
-    println!("  seeds         : 1..=100");
+    println!("  grid entries  : {grid_size}");
+    println!("  seeds         : 1..={seed_count}");
+    println!("  study         : {} / variant {chosen_label}", args.study);
 
     if verdict.passed {
         println!("\n---- limitations that survive a PASS ----");

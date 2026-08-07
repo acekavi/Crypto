@@ -38,6 +38,26 @@ impl GateThresholds {
     }
 }
 
+impl GateThresholds {
+    /// The mean-reversion study's bar, from
+    /// `docs/superpowers/specs/2026-08-07-mean-reversion-study-design.md`.
+    ///
+    /// Four criteria are IDENTICAL to `pre_registered`. Only the benchmark
+    /// percentile is tightened, because that study selects one variant from
+    /// six and reporting the best of six is six chances to find noise:
+    /// Bonferroni spends the 5% across the looks, giving p(100 - 5/6).
+    ///
+    /// A SEPARATE constructor rather than an edit to `pre_registered`, whose
+    /// tripwire test must keep passing untouched — a study may raise its own
+    /// bar, never lower the shared one.
+    pub fn mean_reversion_study() -> Self {
+        GateThresholds {
+            benchmark_percentile: Decimal::new(9917, 2), // p99.17
+            ..Self::pre_registered()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Criterion {
     Expectancy,

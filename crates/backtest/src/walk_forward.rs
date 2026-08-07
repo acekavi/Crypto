@@ -8,7 +8,6 @@
 
 use rust_decimal::Decimal;
 use strategy::Strategy;
-use strategy::pullback::StrategyParams;
 
 use history::HistoryDb;
 use risk::{RiskManager, RiskParams};
@@ -51,17 +50,19 @@ pub struct Fold {
     pub oos_end_ms: i64,
 }
 
+/// Generic over the parameter type so a study can supply its own, rather than
+/// every strategy being forced through one crate's params struct.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FoldResult {
+pub struct FoldResult<P> {
     pub fold: Fold,
-    pub chosen_params: StrategyParams,
+    pub chosen_params: P,
     pub is_metrics: Metrics,
     pub oos_metrics: Metrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WalkForwardResult {
-    pub folds: Vec<FoldResult>,
+pub struct WalkForwardResult<P> {
+    pub folds: Vec<FoldResult<P>>,
     /// Every fold's out-of-sample trades, concatenated. The only evidence.
     pub oos_trades: Vec<ClosedTrade>,
     pub oos_metrics: Metrics,
@@ -113,21 +114,21 @@ pub fn folds(start_ms: i64, end_ms: i64, wf: &WalkForwardConfig) -> Vec<Fold> {
 /// deliberately no search algorithm: the spec puts optimisation beyond a
 /// declared grid out of scope, because that is how overfitting gets
 /// industrialised.
-pub async fn run_walk_forward(
+pub async fn run_walk_forward<P: Clone>(
     db: &HistoryDb,
     cfg: &BacktestConfig,
     wf: &WalkForwardConfig,
-    grid: &[StrategyParams],
+    grid: &[P],
     risk_params: &RiskParams,
     stop_limit_offset_atr: Decimal,
-    make_strategy: &dyn Fn(&StrategyParams) -> Box<dyn Strategy>,
-) -> Result<WalkForwardResult, BacktestError> {
+    make_strategy: &dyn Fn(&P) -> Box<dyn Strategy>,
+) -> Result<WalkForwardResult<P>, BacktestError> {
     let mut fold_results = Vec::new();
     let mut oos_trades: Vec<ClosedTrade> = Vec::new();
 
     for fold in folds(cfg.start_ms, cfg.end_ms, wf) {
         // --- Tune on in-sample only ---
-        let mut best: Option<(StrategyParams, Metrics)> = None;
+        let mut best: Option<(P, Metrics)> = None;
         for params in grid {
             let is_cfg = BacktestConfig {
                 start_ms: fold.is_start_ms,

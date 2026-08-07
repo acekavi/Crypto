@@ -203,3 +203,23 @@ fn the_pre_registered_thresholds_are_exactly_what_the_spec_fixed() {
     assert_eq!(t.min_profit_factor, dec!(1.3));
     assert_eq!(t.benchmark_percentile, dec!(95));
 }
+
+#[test]
+fn the_study_bar_tightens_only_the_benchmark_and_never_the_shared_one() {
+    // A study may raise its own bar; it may never lower the shared one. The
+    // mean-reversion study picks one variant from six, so reporting the best
+    // is six chances to find noise — Bonferroni spends the 5% across the
+    // looks. Every other criterion must be untouched.
+    let base = GateThresholds::pre_registered();
+    let study = GateThresholds::mean_reversion_study();
+
+    assert_eq!(study.benchmark_percentile, dec!(99.17));
+    assert!(
+        study.benchmark_percentile > base.benchmark_percentile,
+        "a study bar must be stricter, never looser"
+    );
+    assert_eq!(study.min_expectancy, base.min_expectancy);
+    assert_eq!(study.min_trades, base.min_trades);
+    assert_eq!(study.max_drawdown_pct, base.max_drawdown_pct);
+    assert_eq!(study.min_profit_factor, base.min_profit_factor);
+}
