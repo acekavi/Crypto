@@ -19,10 +19,6 @@ use rust_decimal::Decimal;
 use strategy::pullback::{PullbackStrategy, StrategyParams};
 use strategy::reversion::{ReversionParams, ReversionStrategy};
 
-/// Seeds for the random-entry benchmark. Fixed and recorded so a reported
-/// percentile can be reproduced exactly by anyone re-running this.
-const BENCHMARK_SEEDS: std::ops::RangeInclusive<u64> = 1..=100;
-
 /// Roughly one signal every 25 candles, chosen so the benchmark places a
 /// comparable NUMBER of trades to the strategy rather than saturating the
 /// position caps. Recorded in the report so the comparison is legible.
