@@ -351,3 +351,58 @@ async fn a_gap_in_stored_data_refuses_the_run_instead_of_replaying_across_it() {
         other => panic!("expected GapInData, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn the_symbol_order_in_the_config_does_not_change_the_result() {
+    // The existing determinism test runs the SAME config twice, which passes
+    // even without a tie-break: ticks are built by walking `cfg.symbols` (a
+    // Vec) and Rust's sort is stable, so the input order survives untouched.
+    // That makes the tie-break defensive rather than load-bearing, and an
+    // untested guard is one a later refactor can quietly delete.
+    //
+    // Listing the same two symbols in the opposite order is what actually
+    // exercises it: both trade on the same H1 grid, so every candle is a tie,
+    // and only an explicit symbol-name comparison can put them back in the
+    // same sequence. Without it the two runs interleave differently and the
+    // global daily-entry and position caps see a different timeline.
+    let (db, _dir) = temp_db().await;
+    let aaa = Symbol::new("AAAUSDT");
+    let bbb = Symbol::new("BBBUSDT");
+    let candles: Vec<Candle> = (0..8).map(|i| wide_candle(i * H1)).collect();
+    db.insert_candles(&aaa, Timeframe::H1, &candles)
+        .await
+        .expect("insert AAA");
+    db.insert_candles(&bbb, Timeframe::H1, &candles)
+        .await
+        .expect("insert BBB");
+
+    let base = BacktestConfig {
+        start_ms: 0,
+        end_ms: 7 * H1,
+        starting_equity: dec!(10000),
+        symbols: vec![aaa.clone(), bbb.clone()],
+        instruments: vec![instrument(&aaa), instrument(&bbb)],
+        costs: costs(),
+        warmup_candles: 5,
+        entry_expiry_candles: 3,
+    };
+    let reversed = BacktestConfig {
+        symbols: vec![bbb.clone(), aaa.clone()],
+        instruments: vec![instrument(&bbb), instrument(&aaa)],
+        ..base.clone()
+    };
+
+    let forward = run_backtest(&db, &base, Box::new(SignalOnceStrategy::new()), risk())
+        .await
+        .expect("forward run");
+    let backward = run_backtest(&db, &reversed, Box::new(SignalOnceStrategy::new()), risk())
+        .await
+        .expect("reversed run");
+
+    assert_eq!(
+        forward, backward,
+        "symbol order in the config must not change a backtest's outcome"
+    );
+    // Not a vacuous pass: two symbols really did trade.
+    assert_eq!(forward.trades.len(), 2);
+}
