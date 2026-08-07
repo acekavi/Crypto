@@ -1,0 +1,8 @@
+# Bybit USDT-perpetual maker fee, standard (non-VIP) tier.
+# Checked against Bybit's published fee schedule on 2026-08-07: 0.02% maker.
+# (Direct fetch of bybit.com timed out in this environment; cross-confirmed
+# via two independent third-party fee trackers instead of assumed. See
+# .superpowers/sdd/2026-08-07-phase2b-simulated-exchange/task-1-2-report.md
+# for sources.)
+# A stale value here silently scales every backtest result.
+maker_fee_rate = "0.0002"
