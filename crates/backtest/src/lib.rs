@@ -1,5 +1,6 @@
 pub mod costs;
 pub mod fills;
+pub mod gate;
 pub mod metrics;
 pub mod random_entry;
 pub mod replay;
@@ -9,6 +10,7 @@ pub mod walk_forward;
 
 pub use costs::{CostModel, funding_charge, funding_timestamps_in};
 pub use fills::{ExitOutcome, FillOutcome, exit_was_ambiguous, limit_fill, resolve_exit};
+pub use gate::{Criterion, CriterionResult, GateThresholds, Verdict, evaluate};
 pub use metrics::{Metrics, compute, equity_curve};
 pub use random_entry::{BenchmarkDistribution, RandomEntryStrategy, percentile, run_benchmark};
 pub use replay::{BacktestConfig, BacktestError, BacktestResult, run_backtest};
