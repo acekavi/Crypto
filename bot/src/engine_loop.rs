@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use botcore::{Candle, Instrument, OrderState, Symbol, Timeframe};
+use botcore::{Candle, Instrument, OrderState, Side, Symbol, Timeframe};
 use engine::{
-    Acceptance, CandleStore, Executor, JournalFacts, OrderTracker, RestingOrder, TrackerAction,
-    assemble_account_state, utc_day_start_ms,
+    Acceptance, CandleStore, EscalationAction, EscalationLadder, Executor, JournalFacts,
+    OrderTracker, RestingOrder, TrackerAction, TriggeredStop, assemble_account_state,
+    next_escalation, utc_day_start_ms,
 };
 use exchange::ExchangeClient;
 use exchange::bybit::transport::ExchangeError;
@@ -13,7 +14,21 @@ use persistence::Journal;
 use risk::{Decision, Refusal, RiskManager};
 use rust_decimal::Decimal;
 use strategy::{MarketContext, Strategy};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
+
+/// The stop this engine remembers placing for an open position.
+///
+/// `Position`, as reported by the exchange, does not carry the stop it was
+/// opened with — only size, entry price and liquidation price. This is
+/// recorded locally the moment `place_entry` succeeds in `on_candle_closed`
+/// and is the only source of truth `drive_stop_escalation` has for a
+/// position's trigger, side and ATR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StopProtection {
+    side: Side,
+    trigger: Decimal,
+    atr: Decimal,
+}
 
 /// Why a candle produced no order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +70,19 @@ pub struct EngineLoop {
     /// "daily" drawdown halt would keep measuring against first-startup
     /// equity and silently become a permanent-since-launch check.
     day_start_ms: i64,
+    /// The stop recorded for each open position, keyed by symbol. Read by
+    /// `drive_stop_escalation` to know a position's trigger since `Position`
+    /// itself does not carry it.
+    protections: HashMap<Symbol, StopProtection>,
+    /// Stops observed past their trigger and not yet filled, keyed by
+    /// symbol. Absence means either the stop has not triggered or it filled
+    /// and closed the position.
+    triggered_stops: HashMap<Symbol, TriggeredStop>,
+    /// Symbols for which an exhausted-ladder halt has already been
+    /// persisted, so `drive_stop_escalation` writes it once rather than on
+    /// every tick the ladder stays exhausted.
+    halted_for_exhaustion: HashSet<Symbol>,
+    ladder: EscalationLadder,
 }
 
 impl EngineLoop {
@@ -85,6 +113,10 @@ impl EngineLoop {
             high_water_mark: Decimal::ZERO,
             day_start_equity: Decimal::ZERO,
             day_start_ms: 0,
+            protections: HashMap::new(),
+            triggered_stops: HashMap::new(),
+            halted_for_exhaustion: HashSet::new(),
+            ladder: EscalationLadder::defaults(),
         }
     }
 
@@ -145,9 +177,176 @@ impl EngineLoop {
             }
             AccountEvent::PositionClosed { symbol } => {
                 info!(%symbol, "position closed");
+                // The stop filled (or the position closed some other way);
+                // the ladder for it is done. Without this, a symbol that
+                // trades repeatedly over a multi-month run would leave a
+                // stale entry behind every time, growing both maps forever.
+                self.protections.remove(symbol);
+                self.triggered_stops.remove(symbol);
+                self.halted_for_exhaustion.remove(symbol);
             }
             AccountEvent::PositionUpdate(_) | AccountEvent::WalletUpdate(_) => {}
         }
+    }
+
+    /// Advance the stop-escalation ladder for every open position that
+    /// carries a recorded protection.
+    ///
+    /// Detection is by price, not by an exchange "stop triggered" event:
+    /// `Position` carries no such signal, so a position still open with the
+    /// last traded price through its own recorded trigger IS the definition
+    /// of a stop that fired and did not fill — exactly the case the ladder
+    /// exists for. A long's stop sells to close, so it triggers on the way
+    /// down (`last_price <= trigger`); a short's stop buys to close, so it
+    /// triggers on the way up (`last_price >= trigger`).
+    ///
+    /// One symbol failing (a bad amend, a missing ticker) must never stop
+    /// the rest from being evaluated, so nothing here uses `?` inside the
+    /// per-position loop — only the two batch fetches at the top can fail
+    /// the whole call.
+    pub async fn drive_stop_escalation(&mut self, now_ms: i64) -> Result<(), ExchangeError> {
+        let positions = self.client.positions().await?;
+        let open: HashSet<Symbol> = positions.iter().map(|p| p.symbol.clone()).collect();
+
+        // A review already flagged unbounded map growth in this codebase: a
+        // symbol that closes (fill, manual close, liquidation) must not keep
+        // its bookkeeping alive for the rest of the process's life. This is
+        // a second line of defence alongside `on_account_event`'s
+        // `PositionClosed` handler — that event can be missed (a dropped
+        // private-feed message), while `positions()` here is the exchange's
+        // own current truth.
+        self.protections.retain(|symbol, _| open.contains(symbol));
+        self.triggered_stops
+            .retain(|symbol, _| open.contains(symbol));
+        self.halted_for_exhaustion
+            .retain(|symbol| open.contains(symbol));
+
+        let tickers = self.client.tickers().await?;
+        let last_price: HashMap<&str, Decimal> = tickers
+            .iter()
+            .map(|t| (t.symbol.as_str(), t.last_price))
+            .collect();
+
+        for position in &positions {
+            let Some(protection) = self.protections.get(&position.symbol) else {
+                continue;
+            };
+            let Some(&price) = last_price.get(position.symbol.as_str()) else {
+                continue;
+            };
+
+            let triggered = match protection.side {
+                Side::Buy => price <= protection.trigger,
+                Side::Sell => price >= protection.trigger,
+            };
+            if !triggered {
+                continue;
+            }
+
+            match self.triggered_stops.get(&position.symbol).cloned() {
+                None => {
+                    // Rung 0 is already resting at its initial offset and
+                    // deserves its own timeout before anything widens it, so
+                    // this tick only starts tracking — it must not also act.
+                    warn!(
+                        symbol = %position.symbol,
+                        trigger = %protection.trigger,
+                        "stop triggered without filling; starting the escalation ladder"
+                    );
+                    self.triggered_stops.insert(
+                        position.symbol.clone(),
+                        TriggeredStop {
+                            symbol: position.symbol.clone(),
+                            side: protection.side,
+                            trigger: protection.trigger,
+                            atr: protection.atr,
+                            rung: 0,
+                            rung_started_ms: now_ms,
+                        },
+                    );
+                }
+                Some(stop) => match next_escalation(&stop, &self.ladder, now_ms) {
+                    EscalationAction::Wait => {}
+                    EscalationAction::Widen { rung, limit_price } => {
+                        match self
+                            .executor
+                            .widen_stop(&position.symbol, stop.trigger, limit_price)
+                            .await
+                        {
+                            Ok(()) => {
+                                if let Some(entry) = self.triggered_stops.get_mut(&position.symbol)
+                                {
+                                    entry.rung = rung;
+                                    entry.rung_started_ms = now_ms;
+                                }
+                            }
+                            // Leave the rung and its start time UNCHANGED.
+                            // Advancing here would skip a rung that never
+                            // actually reached the exchange; the next tick
+                            // retries this same widen.
+                            Err(e) => {
+                                warn!(
+                                    symbol = %position.symbol,
+                                    rung,
+                                    error = %e,
+                                    "widening a triggered stop failed; retrying the same rung next tick"
+                                );
+                            }
+                        }
+                    }
+                    EscalationAction::Exhausted => {
+                        error!(
+                            symbol = %position.symbol,
+                            "stop escalation ladder exhausted; no market order will be sent, \
+                             halting new entries and leaving the position open for a human"
+                        );
+                        // Persist the halt once per symbol, not on every
+                        // tick the ladder stays exhausted — `insert` returns
+                        // true only the first time.
+                        if self.halted_for_exhaustion.insert(position.symbol.clone()) {
+                            let reason =
+                                format!("stop escalation ladder exhausted for {}", position.symbol);
+                            if let Err(e) = self.journal.set_halt(&reason, now_ms).await {
+                                warn!(
+                                    symbol = %position.symbol,
+                                    error = %e,
+                                    "persisting the escalation-exhausted halt failed"
+                                );
+                            }
+                        }
+                    }
+                },
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Test-only: seed a protection record directly, bypassing the strategy
+    /// and risk pipeline that normally produces one via a successful
+    /// `place_entry` in `on_candle_closed`. Driving a full engineered signal
+    /// through the pullback strategy purely to exercise the escalation
+    /// ladder — which only cares that a protection record exists — would be
+    /// disproportionate to what these tests check; see
+    /// `account_state_for_test`, below, for the same rationale.
+    pub fn protect_for_test(&mut self, symbol: Symbol, side: Side, trigger: Decimal, atr: Decimal) {
+        self.protections
+            .insert(symbol, StopProtection { side, trigger, atr });
+    }
+
+    /// Test-only: how many protection records are currently held. Proves
+    /// `on_account_event`'s `PositionClosed` handler and
+    /// `drive_stop_escalation`'s own pruning do not let this map grow
+    /// unboundedly across a multi-month run. `#[cfg(test)]` cannot gate
+    /// this — see `track_for_test`, above.
+    pub fn protection_count_for_test(&self) -> usize {
+        self.protections.len()
+    }
+
+    /// Test-only: how many triggered-stop records are currently held. Same
+    /// rationale as `protection_count_for_test`.
+    pub fn triggered_stop_count_for_test(&self) -> usize {
+        self.triggered_stops.len()
     }
 
     /// Test-only: assemble account state directly, without needing a
@@ -317,6 +516,18 @@ impl EngineLoop {
                 let resting = self.executor.place_entry(&intent).await?;
                 let link_id = resting.link_id.clone();
                 self.tracker.track(resting);
+                // Record the stop this position was opened with — `?` above
+                // means this only runs once the exchange has accepted the
+                // order, and `Position` itself never carries the stop back,
+                // so this is the only place it can be captured.
+                self.protections.insert(
+                    intent.symbol.clone(),
+                    StopProtection {
+                        side: intent.side,
+                        trigger: intent.stop_price,
+                        atr: intent.atr,
+                    },
+                );
                 info!(%symbol, %link_id, qty = %intent.qty, "entry placed");
                 Ok(CandleOutcome::Placed { link_id })
             }

@@ -52,6 +52,7 @@ pub struct MockExchange {
     open_orders: Vec<OpenOrder>,
     place_failure: Mutex<InjectedFailure>,
     cancel_failure: Mutex<InjectedFailure>,
+    amend_failure: Mutex<InjectedFailure>,
     recorded: Mutex<Recorded>,
 }
 
@@ -75,6 +76,7 @@ impl MockExchange {
             open_orders: Vec::new(),
             place_failure: Mutex::new(InjectedFailure::None),
             cancel_failure: Mutex::new(InjectedFailure::None),
+            amend_failure: Mutex::new(InjectedFailure::None),
             recorded: Mutex::new(Recorded::default()),
         }
     }
@@ -134,6 +136,19 @@ impl MockExchange {
 
     pub fn fail_cancel_always(self, err: ExchangeError) -> Self {
         *self.cancel_failure.lock().expect("mock lock") = InjectedFailure::Always(err);
+        self
+    }
+
+    /// Fail the next `amend_stop` only. Models the escalation ladder's own
+    /// retry path: a failed widen must leave the rung unchanged so the next
+    /// tick retries the same target rather than skipping ahead.
+    pub fn fail_amend_stop_once(self, err: ExchangeError) -> Self {
+        *self.amend_failure.lock().expect("mock lock") = InjectedFailure::Once(err);
+        self
+    }
+
+    pub fn fail_amend_stop_always(self, err: ExchangeError) -> Self {
+        *self.amend_failure.lock().expect("mock lock") = InjectedFailure::Always(err);
         self
     }
 
@@ -212,6 +227,23 @@ impl ExchangeClient for MockExchange {
         trigger: Decimal,
         limit_price: Decimal,
     ) -> Result<(), ExchangeError> {
+        // A failed amend is deliberately NOT recorded, for the same reason a
+        // failed placement or cancel is not: callers (the escalation ladder,
+        // here) must be able to distinguish "the exchange did this" from "we
+        // asked", since that distinction is exactly what decides whether the
+        // rung is allowed to advance.
+        {
+            let mut failure = self.amend_failure.lock().expect("mock lock");
+            match &*failure {
+                InjectedFailure::Always(e) => return Err(clone_error(e)),
+                InjectedFailure::Once(e) => {
+                    let err = clone_error(e);
+                    *failure = InjectedFailure::None;
+                    return Err(err);
+                }
+                InjectedFailure::None => {}
+            }
+        }
         self.recorded.lock().expect("mock lock").amended.push((
             symbol.clone(),
             trigger,

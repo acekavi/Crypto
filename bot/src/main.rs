@@ -5,7 +5,7 @@ use std::time::Duration;
 use bot::config::{Config, Profile};
 use bot::engine_loop::EngineLoop;
 use botcore::{ErrorClass, Symbol, Timeframe};
-use engine::{UniverseFilter, reconcile, select_universe};
+use engine::{EscalationLadder, UniverseFilter, reconcile, select_universe};
 use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use exchange::bybit::ws_private::BybitPrivateFeed;
@@ -294,6 +294,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rerank = tokio::time::interval(Duration::from_secs(86_400));
     rerank.tick().await; // the first tick fires immediately; skip it
 
+    // Ticked at a THIRD of the ladder's own per-rung timeout, not the full
+    // timeout: driving the ladder only as often as a rung can time out would
+    // let a rung's true resting time reach almost 2x what the ladder intends
+    // (triggered just after a tick, then waiting a full timeout for the
+    // next one). `EscalationLadder::defaults()` is the same source
+    // `EngineLoop` itself builds its ladder from, so the two can never drift
+    // out of step with each other.
+    let escalation_ladder = EscalationLadder::defaults();
+    let mut escalation_interval = tokio::time::interval(Duration::from_millis(
+        (escalation_ladder.timeout_ms / 3).max(1) as u64,
+    ));
+    escalation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     info!("bot running; Ctrl-C to exit");
     loop {
         tokio::select! {
@@ -358,6 +371,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     warn!(skipped, "fell behind the account feed");
                 }
             },
+            _ = escalation_interval.tick() => {
+                // Mirrors the candle arm above exactly: Fatal halts the
+                // process, anything else is logged and the loop continues —
+                // one bad tick must not stop the ladder from being driven on
+                // every OTHER open position.
+                if let Err(e) = engine_loop.drive_stop_escalation(rest.clock().now_ms()).await {
+                    if e.class() == ErrorClass::Fatal {
+                        error!(error = %e, "fatal error driving stop escalation; halting");
+                        return Err(e.into());
+                    }
+                    warn!(error = %e, "driving stop escalation failed");
+                }
+            }
             _ = rerank.tick() => {
                 let protected = engine_loop.protected_symbols().await?;
                 let tickers = rest.tickers().await?;
