@@ -356,18 +356,18 @@ git -c user.email=avishkakavinda@proton.me -c user.name=acekavi commit -m "feat(
 
 A backtest that runs across a hole prices a move that never happened continuously. The live engine already refuses to advance past an unfilled hole; this is the same rule applied to history.
 
-- [ ] **Step 1: Add `Timeframe::duration_ms` in `crates/botcore/src/candle.rs`**
+- [ ] **Step 1: Confirm `Timeframe::duration_ms` already exists — do NOT re-add it**
 
-```rust
-    /// Candle duration in milliseconds. Used to tell a genuine gap from
-    /// consecutive candles.
-    pub fn duration_ms(self) -> i64 {
-        match self {
-            Timeframe::H1 => 3_600_000,
-            Timeframe::H4 => 14_400_000,
-        }
-    }
+**Plan correction (2026-08-07):** this step originally said to add
+`Timeframe::duration_ms`. It has existed in `crates/botcore/src/candle.rs`
+since Phase 1 (commit `bc22901`) with its own passing tests, and
+`Candle::close_time_ms` already uses it. Verify it is there and move on:
+
+```bash
+grep -n "duration_ms" crates/botcore/src/candle.rs
 ```
+
+Re-adding it would be a duplicate-definition compile error.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -454,8 +454,8 @@ Walk consecutive pairs; a gap exists where `next.open_time_ms - prev.open_time_m
 - [ ] **Step 6: Commit**
 
 ```bash
-cargo fmt -p history -p botcore
-git add crates/history crates/botcore
+cargo fmt -p history
+git add crates/history
 git -c user.email=avishkakavinda@proton.me -c user.name=acekavi commit -m "feat(history): detect gaps in a stored candle series"
 ```
 
