@@ -249,6 +249,12 @@ pub struct OpenOrderRow {
     pub order_status: String,
     #[serde(rename = "createdTime")]
     pub created_time: String,
+    // Optional because not every caller of this row type is guaranteed to
+    // populate it (e.g. a hand-built fixture); `into_open_order` falls back
+    // to `created_time` when it is missing or fails to parse, so decoding
+    // never fails an order over this field.
+    #[serde(rename = "updatedTime", default)]
+    pub updated_time: Option<String>,
 }
 
 impl OpenOrderRow {
@@ -265,6 +271,19 @@ impl OpenOrderRow {
                 )));
             }
         };
+        let created_time_ms = self
+            .created_time
+            .parse::<i64>()
+            .map_err(|e| ExchangeError::Decode(format!("createdTime: {e}")))?;
+        // updatedTime absent or unparseable falls back to createdTime rather
+        // than failing the whole order: losing same-day fill precision is far
+        // cheaper than refusing to track an order the exchange already
+        // accepted.
+        let updated_time_ms = self
+            .updated_time
+            .as_deref()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(created_time_ms);
         Ok(OpenOrder {
             symbol: Symbol::new(self.symbol),
             order_id: self.order_id,
@@ -274,10 +293,8 @@ impl OpenOrderRow {
             qty: req_decimal(&self.qty, "order qty")?,
             cum_exec_qty: req_decimal(&self.cum_exec_qty, "cumExecQty")?,
             state,
-            created_time_ms: self
-                .created_time
-                .parse::<i64>()
-                .map_err(|e| ExchangeError::Decode(format!("createdTime: {e}")))?,
+            created_time_ms,
+            updated_time_ms,
         })
     }
 }
@@ -345,5 +362,44 @@ mod tests {
         assert_eq!(env.time, 1_700_000_000_000);
         let value = env.into_result().expect("retCode 0 is success");
         assert_eq!(value["value"], 7);
+    }
+
+    fn open_order_json(updated_time_field: &str) -> String {
+        format!(
+            r#"{{"symbol":"BTCUSDT","orderId":"oid-1","orderLinkId":"link-1","side":"Buy",
+                "price":"42000","qty":"0.01","cumExecQty":"0",
+                "orderStatus":"New","createdTime":"1700000000000"{updated_time_field}}}"#
+        )
+    }
+
+    #[test]
+    fn open_order_row_uses_updated_time_when_present() {
+        let raw = open_order_json(r#","updatedTime":"1700000005000""#);
+        let row: OpenOrderRow = serde_json::from_str(&raw).expect("row parses");
+        let order = row.into_open_order().expect("row converts");
+
+        assert_eq!(order.created_time_ms, 1_700_000_000_000);
+        assert_eq!(order.updated_time_ms, 1_700_000_005_000);
+    }
+
+    #[test]
+    fn open_order_row_falls_back_to_created_time_when_updated_time_is_absent() {
+        // Falling back rather than failing the order matters: losing
+        // same-day fill precision is far cheaper than refusing to track an
+        // order the exchange already accepted.
+        let raw = open_order_json("");
+        let row: OpenOrderRow = serde_json::from_str(&raw).expect("row parses");
+        let order = row.into_open_order().expect("row converts");
+
+        assert_eq!(order.updated_time_ms, order.created_time_ms);
+    }
+
+    #[test]
+    fn open_order_row_falls_back_to_created_time_when_updated_time_is_unparseable() {
+        let raw = open_order_json(r#","updatedTime":"not-a-number""#);
+        let row: OpenOrderRow = serde_json::from_str(&raw).expect("row parses");
+        let order = row.into_open_order().expect("row converts");
+
+        assert_eq!(order.updated_time_ms, order.created_time_ms);
     }
 }

@@ -155,6 +155,7 @@ mod tests {
             cum_exec_qty: cum,
             state,
             created_time_ms: 0,
+            updated_time_ms: 0,
         }
     }
 

@@ -157,11 +157,16 @@ impl EngineLoop {
                 self.tracker.on_order_update(order);
                 // Mirror the state change into the journal. A journal failure
                 // must never disturb trading, so it is logged, not propagated.
+                //
+                // `updated_time_ms`, not `created_time_ms`: the daily fill cap
+                // counts at fill, and an order placed at 23:50 UTC that fills
+                // at 00:05 must count against the day it filled, not the day
+                // it was placed.
                 let filled_at = matches!(
                     order.state,
                     OrderState::Filled | OrderState::PartiallyFilled
                 )
-                .then_some(order.created_time_ms);
+                .then_some(order.updated_time_ms);
                 if let Err(e) = self
                     .journal
                     .update_order_state(

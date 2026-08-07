@@ -29,6 +29,7 @@ fn open_order(link_id: &str, created_ms: i64) -> OpenOrder {
         cum_exec_qty: dec!(0),
         state: OrderState::New,
         created_time_ms: created_ms,
+        updated_time_ms: created_ms,
     }
 }
 

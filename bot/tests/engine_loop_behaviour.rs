@@ -221,6 +221,7 @@ async fn an_account_event_marking_an_order_filled_stops_it_from_resting() {
         cum_exec_qty: dec!(1),
         state: OrderState::Filled,
         created_time_ms: 0,
+        updated_time_ms: 0,
     });
 
     el.on_account_event(&event).await;
@@ -229,6 +230,89 @@ async fn an_account_event_marking_an_order_filled_stops_it_from_resting() {
         !el.tracker_mut().is_resting("filled-entry"),
         "a Filled account event must reach OrderTracker::on_order_update so it stops \
          treating the order as resting"
+    );
+}
+
+#[tokio::test]
+async fn a_fill_that_crosses_utc_midnight_counts_toward_the_later_day() {
+    // The daily fill cap counts at fill time, not placement time. An order
+    // placed at 23:50 UTC that fills five minutes into the next day must be
+    // attributed to the day it filled, not the day it was placed — otherwise
+    // the cap could let a 6th entry through on the day the fill actually
+    // landed.
+    use botcore::{OpenOrder, OrderState, Side};
+    use engine::utc_day_start_ms;
+    use exchange::bybit::ws_private::AccountEvent;
+    use persistence::{Journal, OrderRecord};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let journal = Arc::new(
+        Journal::open_local(dir.path().join("j.db").to_str().unwrap())
+            .await
+            .expect("journal"),
+    );
+    let mut el = EngineLoop::new(
+        Box::new(PullbackStrategy::new(StrategyParams::defaults())),
+        RiskManager::new(RiskParams::defaults(), dec!(0.3)),
+        Arc::new(MockExchange::new()),
+        Arc::clone(&journal),
+        vec![instrument()],
+        "cfg".into(),
+        3,
+        250,
+    );
+
+    // An arbitrary day boundary, far from the epoch, plus/minus ten minutes.
+    let day2_start = utc_day_start_ms(10 * 86_400_000);
+    let created_before_midnight = day2_start - 10 * 60_000;
+    let updated_after_midnight = day2_start + 5 * 60_000;
+    let day1_start = utc_day_start_ms(created_before_midnight);
+
+    // The order must already exist in the journal for update_order_state to
+    // have a row to update — mirrors what Executor::place_entry does at
+    // placement time in production.
+    journal
+        .record_order(&OrderRecord {
+            order_link_id: "cross-midnight".into(),
+            order_id: Some("oid-cross".into()),
+            symbol: Symbol::new("BTCUSDT"),
+            side: Side::Buy,
+            price: dec!(100),
+            qty: dec!(1),
+            stop_loss: dec!(90),
+            take_profit: dec!(120),
+            state: OrderState::New,
+            cum_exec_qty: dec!(0),
+            config_hash: "cfg".into(),
+            created_at_ms: created_before_midnight,
+        })
+        .await
+        .expect("seed the order");
+
+    let event = AccountEvent::OrderUpdate(OpenOrder {
+        symbol: Symbol::new("BTCUSDT"),
+        order_id: "oid-cross".into(),
+        order_link_id: "cross-midnight".into(),
+        side: Side::Buy,
+        price: dec!(100),
+        qty: dec!(1),
+        cum_exec_qty: dec!(1),
+        state: OrderState::Filled,
+        created_time_ms: created_before_midnight,
+        updated_time_ms: updated_after_midnight,
+    });
+
+    el.on_account_event(&event).await;
+
+    assert_eq!(
+        journal.daily_fill_count(day1_start).await.expect("count"),
+        0,
+        "the fill must not be attributed to the day the order was placed"
+    );
+    assert_eq!(
+        journal.daily_fill_count(day2_start).await.expect("count"),
+        1,
+        "the fill must be attributed to the day it actually filled"
     );
 }
 

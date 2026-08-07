@@ -1,4 +1,19 @@
+use std::path::{Path, PathBuf};
+
 use bot::config::{Config, ConfigError, Profile};
+
+/// `CARGO_MANIFEST_DIR` for the `bot` crate is the workspace root's `bot/`
+/// subdirectory, one level down from the workspace root itself — unlike
+/// `Config::load`'s own `config/{profile}.toml`, which is only correct
+/// relative to a process launched from the workspace root (as `cargo run`
+/// is), not relative to `cargo test`'s per-package working directory.
+fn config_path(profile: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root exists")
+        .join("config")
+        .join(format!("{profile}.toml"))
+}
 
 #[test]
 fn testnet_profile_points_at_testnet_hosts() {
@@ -53,6 +68,39 @@ fn testnet_never_requires_confirmation() {
             Profile::Testnet
         );
     });
+}
+
+#[test]
+fn testnet_toml_parses() {
+    let text = std::fs::read_to_string(config_path("testnet")).expect("config/testnet.toml reads");
+    Config::from_toml_str(&text).expect("config/testnet.toml parses");
+}
+
+#[test]
+fn mainnet_toml_parses_and_keeps_testnets_risk_envelope() {
+    let testnet_text =
+        std::fs::read_to_string(config_path("testnet")).expect("config/testnet.toml reads");
+    let mainnet_text =
+        std::fs::read_to_string(config_path("mainnet")).expect("config/mainnet.toml reads");
+    let testnet = Config::from_toml_str(&testnet_text).expect("config/testnet.toml parses");
+    let mainnet = Config::from_toml_str(&mainnet_text).expect("config/mainnet.toml parses");
+
+    // The risk envelope and strategy rules must not quietly diverge between
+    // profiles — the turnover floor is the one thing that legitimately
+    // differs, because testnet has almost no volume to filter against.
+    assert_eq!(
+        mainnet.risk, testnet.risk,
+        "mainnet must carry testnet's exact risk envelope"
+    );
+    assert_eq!(
+        mainnet.strategy, testnet.strategy,
+        "mainnet must carry testnet's exact strategy rules"
+    );
+    assert_ne!(
+        mainnet.universe.min_turnover_24h, testnet.universe.min_turnover_24h,
+        "mainnet's turnover floor must be a realistic mainnet figure, not testnet's \
+         near-zero-volume floor"
+    );
 }
 
 #[test]

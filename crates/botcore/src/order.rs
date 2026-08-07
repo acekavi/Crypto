@@ -72,4 +72,10 @@ pub struct OpenOrder {
     pub cum_exec_qty: Decimal,
     pub state: OrderState,
     pub created_time_ms: i64,
+    /// When Bybit last updated this order — the moment a fill actually
+    /// happened, as opposed to `created_time_ms` (when it was placed). The
+    /// daily fill cap must key off this: an order placed at 23:50 UTC that
+    /// fills at 00:05 belongs to the day it filled, not the day it was
+    /// placed.
+    pub updated_time_ms: i64,
 }
