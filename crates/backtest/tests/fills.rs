@@ -96,12 +96,17 @@ fn a_candle_reaching_both_stop_and_target_resolves_as_stopped() {
 fn a_short_position_stops_out_when_price_trades_above_the_stop_limit() {
     // Short closes by BUYING; its stop sits ABOVE and its target BELOW.
     // Getting this backwards silently inverts every short trade.
+    //
+    // The low is deliberately held ABOVE the stop. With a lower low this
+    // assertion also passes under inverted direction logic (the low would sit
+    // below the stop and register as a hit for the wrong reason), so it would
+    // not actually guard the thing its name claims to guard.
     assert_eq!(
         resolve_exit(
             Side::Sell,
             dec!(102),
             dec!(96),
-            &candle(dec!(103), dec!(100))
+            &candle(dec!(103), dec!(102.5))
         ),
         ExitOutcome::Stopped { price: dec!(102) }
     );
