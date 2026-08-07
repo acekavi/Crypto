@@ -1,8 +1,16 @@
-# Bybit USDT-perpetual maker fee, standard (non-VIP) tier.
-# Checked against Bybit's published fee schedule on 2026-08-07: 0.02% maker.
-# (Direct fetch of bybit.com timed out in this environment; cross-confirmed
-# via two independent third-party fee trackers instead of assumed. See
-# .superpowers/sdd/2026-08-07-phase2b-simulated-exchange/task-1-2-report.md
-# for sources.)
-# A stale value here silently scales every backtest result.
+# Bybit USDT-perpetual MAKER fee, Standard (non-VIP) tier: 0.02%.
+#
+# Provenance, stated plainly because a stale or wrong value here silently
+# scales every backtest result rather than failing loudly:
+#   Re-checked 2026-08-07. Direct fetches of bybit.com's own fee pages
+#   (/en/announcement-info/fee-rate/ and the Trading Fee Structure help-centre
+#   article) TIMED OUT repeatedly from this environment, so this is NOT
+#   primary-sourced. It is corroborated by several independent third-party
+#   trackers that agree on 0.02% maker / 0.055% taker at the Standard tier.
+#   Confirm against Bybit's own schedule before trusting a PASS verdict, and
+#   re-check if the account ever reaches a VIP tier.
+#
+# The taker rate is deliberately absent: the bot places no market orders, so
+# taker fees can never apply. Adding one here would imply a path that does not
+# exist.
 maker_fee_rate = "0.0002"
