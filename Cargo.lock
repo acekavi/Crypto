@@ -357,6 +357,7 @@ dependencies = [
  "engine",
  "exchange",
  "hex",
+ "history",
  "indicators",
  "persistence",
  "risk",

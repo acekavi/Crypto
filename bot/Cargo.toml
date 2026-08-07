@@ -8,6 +8,10 @@ rust-version.workspace = true
 name = "crypto-bot"
 path = "src/main.rs"
 
+[[bin]]
+name = "download-history"
+path = "src/bin/download_history.rs"
+
 [lib]
 name = "bot"
 path = "src/lib.rs"
@@ -16,6 +20,7 @@ path = "src/lib.rs"
 botcore = { path = "../crates/botcore" }
 engine = { path = "../crates/engine" }
 exchange = { path = "../crates/exchange" }
+history = { path = "../crates/history" }
 indicators = { path = "../crates/indicators" }
 persistence = { path = "../crates/persistence" }
 risk = { path = "../crates/risk" }

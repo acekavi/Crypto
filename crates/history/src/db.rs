@@ -11,6 +11,11 @@ pub enum HistoryError {
     Db(String),
     #[error("decode error: {0}")]
     Decode(String),
+    /// A fetch from the exchange failed, as distinct from `Db`/`Decode`: a
+    /// caller (or a test) needs to tell "the network/API failed" apart from
+    /// "our own storage failed" without string-matching an error message.
+    #[error("exchange error: {0}")]
+    Exchange(String),
 }
 
 impl From<turso::Error> for HistoryError {
