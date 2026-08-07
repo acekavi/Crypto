@@ -208,6 +208,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backtest"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "botcore",
+ "engine",
+ "exchange",
+ "history",
+ "persistence",
+ "risk",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "strategy",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

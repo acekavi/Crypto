@@ -1,0 +1,23 @@
+[package]
+name = "backtest"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+botcore = { path = "../botcore" }
+exchange = { path = "../exchange" }
+history = { path = "../history" }
+persistence = { path = "../persistence" }
+risk = { path = "../risk" }
+strategy = { path = "../strategy" }
+engine = { path = "../engine" }
+async-trait = "0.1"
+rust_decimal.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+tempfile = "3"
