@@ -259,7 +259,8 @@ git -c user.email=avishkakavinda@proton.me -c user.name=acekavi commit -m "feat(
 
 Cover with exact assertions:
 1. `folds` over exactly 8 months with 6/2 produces **one** fold, covering IS `[0, 6mo)` and OOS `[6mo, 8mo)`.
-2. Over 12 months it produces **4** folds (rolling by 2 months), and each fold's `oos_start_ms` equals the previous fold's `oos_end_ms` — contiguous, non-overlapping.
+2. Over 12 months it produces **3** folds (rolling by 2 months), and each fold's `oos_start_ms` equals the previous fold's `oos_end_ms` — contiguous, non-overlapping.
+   *(Plan correction, 2026-08-07: this said 4. The first fold consumes 6+2=8 months and each further fold needs 2 more, so 12 months yields 3. Caught during execution — the implementation was right and the plan's arithmetic was wrong.)*
 3. A range too short for one full fold produces **zero** folds, not a truncated one.
 4. `run_walk_forward` concatenates OOS trades across folds and `oos_metrics.trade_count` equals `oos_trades.len()`.
 5. **The chosen parameters come from in-sample only.** Build a grid where one entry is clearly best in-sample and a different one clearly best out-of-sample, and assert the in-sample winner is what got used. This is the test that proves the harness is not peeking.
