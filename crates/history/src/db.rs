@@ -335,14 +335,19 @@ impl HistoryDb {
     /// Every `(symbol, timeframe)` series present, with its recorded bounds.
     ///
     /// Reads `download_ranges` rather than scanning `candles`, so it stays
-    /// cheap as history grows. Ordered by symbol then timeframe so a caller
-    /// building a universe from it gets a deterministic list.
+    /// cheap as history grows.
+    ///
+    /// Ordered by symbol, then by timeframe DURATION — finest first — so a
+    /// caller gets a deterministic and unsurprising list. The sort happens in
+    /// Rust because `timeframe` is stored as Bybit's interval TEXT, and
+    /// `ORDER BY` on it compares lexicographically: `"240"` sorts before
+    /// `"60"`, putting H4 ahead of H1. The same TEXT-comparison hazard as the
+    /// journal's equity column.
     pub async fn stored_series(&self) -> Result<Vec<(Symbol, Timeframe, i64, i64)>, HistoryError> {
         let mut rows = self
             .conn
             .query(
-                "SELECT symbol, timeframe, earliest_ms, latest_ms FROM download_ranges
-                 ORDER BY symbol ASC, timeframe ASC",
+                "SELECT symbol, timeframe, earliest_ms, latest_ms FROM download_ranges",
                 (),
             )
             .await?;
@@ -378,6 +383,11 @@ impl HistoryDb {
             };
             out.push((Symbol::new(text(0)?), tf, int(2)?, int(3)?));
         }
+        out.sort_by(|a, b| {
+            a.0.as_str()
+                .cmp(b.0.as_str())
+                .then_with(|| a.1.duration_ms().cmp(&b.1.duration_ms()))
+        });
         Ok(out)
     }
 
