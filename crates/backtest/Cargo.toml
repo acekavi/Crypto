@@ -12,6 +12,10 @@ persistence = { path = "../persistence" }
 risk = { path = "../risk" }
 strategy = { path = "../strategy" }
 engine = { path = "../engine" }
+# EngineLoop itself lives in the `bot` binary crate's library target, not in
+# `engine` — it is the wiring that ties strategy, risk, and executor
+# together, and that wiring is exactly what this crate must replay unchanged.
+bot = { path = "../../bot" }
 async-trait = "0.1"
 rust_decimal.workspace = true
 thiserror.workspace = true

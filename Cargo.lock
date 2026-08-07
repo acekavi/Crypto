@@ -212,6 +212,7 @@ name = "backtest"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bot",
  "botcore",
  "engine",
  "exchange",
