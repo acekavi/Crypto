@@ -1,4 +1,5 @@
 use botcore::{Candle, Symbol, Timeframe};
+use exchange::bybit::wire::FundingRate;
 use history::HistoryDb;
 use rust_decimal_macros::dec;
 
@@ -152,5 +153,51 @@ async fn recorded_range_reports_the_stored_bounds() {
     assert_eq!(
         db.recorded_range(&sym, Timeframe::H1).await.expect("q"),
         Some((1000, 5000))
+    );
+}
+
+#[tokio::test]
+async fn funding_rates_round_trip_including_negative_rates() {
+    // A negative rate means shorts are PAID. Dropping the sign would invert
+    // the cost of every short position in the backtest.
+    let (db, _dir) = temp_db().await;
+    let sym = Symbol::new("BTCUSDT");
+    db.insert_funding(&[
+        FundingRate {
+            symbol: sym.clone(),
+            funding_time_ms: 1000,
+            rate: dec!(0.0001),
+        },
+        FundingRate {
+            symbol: sym.clone(),
+            funding_time_ms: 2000,
+            rate: dec!(-0.00025),
+        },
+    ])
+    .await
+    .expect("insert");
+
+    let got = db.funding_in_range(&sym, 0, 9999).await.expect("query");
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].rate, dec!(0.0001));
+    assert_eq!(got[1].rate, dec!(-0.00025));
+}
+
+#[tokio::test]
+async fn reinserting_a_funding_timestamp_does_not_duplicate_it() {
+    let (db, _dir) = temp_db().await;
+    let sym = Symbol::new("BTCUSDT");
+    let r = FundingRate {
+        symbol: sym.clone(),
+        funding_time_ms: 1000,
+        rate: dec!(0.0001),
+    };
+    db.insert_funding(std::slice::from_ref(&r))
+        .await
+        .expect("first");
+    db.insert_funding(&[r]).await.expect("second");
+    assert_eq!(
+        db.funding_in_range(&sym, 0, 9999).await.expect("q").len(),
+        1
     );
 }

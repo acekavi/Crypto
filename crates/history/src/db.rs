@@ -1,4 +1,5 @@
 use botcore::{Candle, Symbol, Timeframe};
+use exchange::bybit::wire::FundingRate;
 use rust_decimal::Decimal;
 use turso::Connection;
 
@@ -251,6 +252,71 @@ impl HistoryDb {
             .copied()
             .ok_or_else(|| HistoryError::Decode("latest_ms is not an integer".into()))?;
         Ok(Some((earliest, latest)))
+    }
+
+    /// Idempotent batch insert: `INSERT OR REPLACE` on `(symbol,
+    /// funding_time_ms)` means a resumed or overlapping download can never
+    /// duplicate a settlement.
+    pub async fn insert_funding(&self, rates: &[FundingRate]) -> Result<(), HistoryError> {
+        if rates.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.unchecked_transaction().await?;
+        for r in rates {
+            tx.execute(
+                "INSERT OR REPLACE INTO funding_rates (symbol, funding_time_ms, rate)
+                 VALUES (?1, ?2, ?3)",
+                (
+                    r.symbol.as_str().to_string(),
+                    r.funding_time_ms,
+                    r.rate.to_string(),
+                ),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Inclusive of both bounds, ascending by `funding_time_ms`.
+    pub async fn funding_in_range(
+        &self,
+        symbol: &Symbol,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<FundingRate>, HistoryError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT funding_time_ms, rate FROM funding_rates
+                 WHERE symbol = ?1 AND funding_time_ms BETWEEN ?2 AND ?3
+                 ORDER BY funding_time_ms ASC",
+                (symbol.as_str().to_string(), start_ms, end_ms),
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let funding_time_ms = row
+                .get_value(0)
+                .map_err(|e| HistoryError::Db(e.to_string()))?
+                .as_integer()
+                .copied()
+                .ok_or_else(|| HistoryError::Decode("funding_time_ms is not an integer".into()))?;
+            let rate_text = row
+                .get_value(1)
+                .map_err(|e| HistoryError::Db(e.to_string()))?
+                .as_text()
+                .map(|s| s.to_string())
+                .ok_or_else(|| HistoryError::Decode("rate is not text".into()))?;
+            out.push(FundingRate {
+                symbol: symbol.clone(),
+                funding_time_ms,
+                rate: parse_dec(&rate_text, "rate")?,
+            });
+        }
+        Ok(out)
     }
 
     async fn scalar_i64(

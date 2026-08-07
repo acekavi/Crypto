@@ -168,6 +168,54 @@ impl TickerRow {
     }
 }
 
+/// A funding-rate print as Bybit's `/v5/market/funding/history` returns it.
+///
+/// Confirmed live against `api-testnet.bybit.com` (2026-08-07, via curl):
+/// field names are `fundingRate` and `fundingRateTimestamp`, both
+/// string-encoded, matching the plan's expectation.
+#[derive(Debug, Deserialize)]
+pub struct FundingRateRow {
+    pub symbol: String,
+    #[serde(rename = "fundingRate")]
+    pub funding_rate: String,
+    #[serde(rename = "fundingRateTimestamp")]
+    pub funding_rate_timestamp: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FundingResult {
+    // See the comment on `KlineResult::list`: an error response's
+    // `result: {}` must still deserialize so retCode/time survive.
+    #[serde(default)]
+    pub list: Vec<FundingRateRow>,
+}
+
+/// One funding settlement for a symbol. `rate` carries its sign: negative
+/// means shorts were paid that period, not longs — inverting or dropping it
+/// silently inverts the cost of every short in a backtest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingRate {
+    pub symbol: Symbol,
+    pub funding_time_ms: i64,
+    pub rate: Decimal,
+}
+
+impl FundingRateRow {
+    pub fn into_funding_rate(self) -> Result<FundingRate, ExchangeError> {
+        Ok(FundingRate {
+            symbol: Symbol::new(self.symbol),
+            funding_time_ms: self
+                .funding_rate_timestamp
+                .parse::<i64>()
+                .map_err(|e| ExchangeError::Decode(format!("fundingRateTimestamp: {e}")))?,
+            rate: self
+                .funding_rate
+                .parse::<Decimal>()
+                .map_err(|e| ExchangeError::Decode(format!("fundingRate: {e}")))?,
+        })
+    }
+}
+
 use botcore::{Balance, OpenOrder, OrderState, Position, Side};
 
 #[derive(Debug, Deserialize)]

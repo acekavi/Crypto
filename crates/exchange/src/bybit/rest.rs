@@ -13,8 +13,8 @@ use super::rate_limit::RateLimiter;
 use super::sign::{ClockOffset, Credentials, local_now_ms, sign_rest};
 use super::transport::{ExchangeError, backoff_delay};
 use super::wire::{
-    Envelope, InstrumentRow, KlineResult, KlineRow, ListResult, OpenOrderRow, OrderCreateResult,
-    PositionRow, Ticker, TickerRow, WalletRow,
+    Envelope, FundingRate, FundingRateRow, FundingResult, InstrumentRow, KlineResult, KlineRow,
+    ListResult, OpenOrderRow, OrderCreateResult, PositionRow, Ticker, TickerRow, WalletRow,
 };
 use crate::traits::ExchangeClient;
 
@@ -28,6 +28,12 @@ const BACKOFF_JITTER: f64 = 0.25;
 // with retCode 0 — the server silently clamps rather than rejecting, so 1000
 // is the real per-page ceiling.
 const KLINE_PAGE_LIMIT: u16 = 1000;
+
+// Confirmed live against api-testnet.bybit.com/v5/market/funding/history
+// (2026-08-07): limit=201 and limit=250 both still return exactly 200 rows
+// with retCode 0 — a lower silent clamp than kline's 1000, and confirmed
+// rather than assumed per the plan's instruction not to guess.
+const FUNDING_PAGE_LIMIT: u16 = 200;
 
 /// Bybit V5 REST client.
 ///
@@ -238,36 +244,91 @@ impl BybitRest {
         })
         .await
     }
+
+    /// Fetches every funding-rate print in `[start_ms, end_ms]`, paging
+    /// through Bybit's funding-history endpoint as needed.
+    ///
+    /// Confirmed live against `api-testnet.bybit.com/v5/market/funding/history`
+    /// (2026-08-07, via `curl`): field names are `fundingRate` and
+    /// `fundingRateTimestamp` (both strings), the `list` comes back **newest
+    /// first** — same ordering as `/v5/market/kline` — and `limit` is
+    /// silently clamped to 200 (see `FUNDING_PAGE_LIMIT`), never rejected.
+    /// Unlike kline's `start`/`end`, this endpoint's range params are
+    /// `startTime`/`endTime`; passing `start`/`end` here was verified to be
+    /// silently ignored (identical output with and without them).
+    ///
+    /// Reuses `self.get` (rate limiter + retry/backoff) and the same
+    /// non-advancing-cursor guard as `klines_range`, via the shared
+    /// `walk_pages_newest_first` — no second hand-written pagination loop.
+    pub async fn funding_history(
+        &self,
+        symbol: &Symbol,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<FundingRate>, ExchangeError> {
+        let symbol = symbol.clone();
+        walk_pages_newest_first(
+            start_ms,
+            end_ms,
+            |page_start, page_end| {
+                let symbol = symbol.clone();
+                async move {
+                    let res: FundingResult = self
+                        .get(
+                            "/v5/market/funding/history",
+                            &[
+                                ("category", "linear".into()),
+                                ("symbol", symbol.as_str().to_string()),
+                                ("startTime", page_start.to_string()),
+                                ("endTime", page_end.to_string()),
+                                ("limit", FUNDING_PAGE_LIMIT.to_string()),
+                            ],
+                        )
+                        .await?;
+                    res.list
+                        .into_iter()
+                        .map(FundingRateRow::into_funding_rate)
+                        .collect()
+                }
+            },
+            |r: &FundingRate| r.funding_time_ms,
+        )
+        .await
+    }
 }
 
-/// Pure page-walking logic behind `klines_range`, independent of HTTP so it
-/// can be driven by a fake `fetch` in tests without touching the network.
+/// Pure page-walking logic behind both `klines_range` and `funding_history`,
+/// independent of HTTP and of the item type, so it can be driven by a fake
+/// `fetch` in tests without touching the network and carries exactly one
+/// copy of the non-advancing-cursor guard.
 ///
-/// `fetch(page_start, page_end)` must behave like Bybit: return candles in
-/// `[page_start, page_end]` **newest first**. The walk starts with
-/// `page_end = end_ms` and, after each non-empty page, moves `page_end` to
-/// just before the oldest candle that page returned — i.e. it pages
-/// backward through time, matching the API's own ordering.
+/// `fetch(page_start, page_end)` must behave like Bybit: return items in
+/// `[page_start, page_end]` **newest first**, keyed by `key`. The walk
+/// starts with `page_end = end_ms` and, after each non-empty page, moves
+/// `page_end` to just before the oldest item that page returned — i.e. it
+/// pages backward through time, matching the API's own ordering.
 ///
 /// Stops when:
 /// - a page comes back empty,
-/// - the oldest candle received reaches `start_ms` (the range is covered), or
+/// - the oldest item received reaches `start_ms` (the range is covered), or
 /// - **a page fails to move the cursor backward at all** — collected so far
 ///   is returned and a warning logged, rather than retrying the same window
 ///   forever against a rate-limited API.
 ///
-/// Deduplicates by `open_time_ms` (overlapping pages are normal), drops
-/// anything outside `[start_ms, end_ms]`, and returns ascending.
-pub async fn walk_kline_pages<F, Fut>(
+/// Deduplicates by `key` (overlapping pages are normal), drops anything
+/// outside `[start_ms, end_ms]`, and returns ascending.
+pub async fn walk_pages_newest_first<T, F, Fut, K>(
     start_ms: i64,
     end_ms: i64,
     mut fetch: F,
-) -> Result<Vec<Candle>, ExchangeError>
+    key: K,
+) -> Result<Vec<T>, ExchangeError>
 where
     F: FnMut(i64, i64) -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<Candle>, ExchangeError>>,
+    Fut: std::future::Future<Output = Result<Vec<T>, ExchangeError>>,
+    K: Fn(&T) -> i64,
 {
-    let mut collected: Vec<Candle> = Vec::new();
+    let mut collected: Vec<T> = Vec::new();
     let mut cursor_end = end_ms;
 
     loop {
@@ -278,7 +339,7 @@ where
 
         let page_oldest = page
             .iter()
-            .map(|c| c.open_time_ms)
+            .map(&key)
             .min()
             .expect("checked non-empty above");
         collected.extend(page);
@@ -291,17 +352,38 @@ where
         if next_cursor >= cursor_end {
             warn!(
                 cursor_end,
-                "kline page fetch did not advance the cursor; stopping instead of looping forever"
+                "page fetch did not advance the cursor; stopping instead of looping forever"
             );
             break;
         }
         cursor_end = next_cursor;
     }
 
-    collected.retain(|c| c.open_time_ms >= start_ms && c.open_time_ms <= end_ms);
-    collected.sort_by_key(|c| c.open_time_ms);
-    collected.dedup_by_key(|c| c.open_time_ms);
+    collected.retain(|item| {
+        let k = key(item);
+        k >= start_ms && k <= end_ms
+    });
+    collected.sort_by_key(|item| key(item));
+    // `dedup_by_key`'s closure takes `&mut T` (an artifact of how `Vec`
+    // dedup is implemented); `&mut T` coerces to `&T` at the call, so `key`
+    // — written once against `&T` — still works unmodified here.
+    collected.dedup_by_key(|item| key(item));
     Ok(collected)
+}
+
+/// `Candle`-specialised entry point kept for `klines_range` and its existing
+/// pagination tests; the guard and looping logic itself lives once in
+/// `walk_pages_newest_first`.
+pub async fn walk_kline_pages<F, Fut>(
+    start_ms: i64,
+    end_ms: i64,
+    fetch: F,
+) -> Result<Vec<Candle>, ExchangeError>
+where
+    F: FnMut(i64, i64) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Candle>, ExchangeError>>,
+{
+    walk_pages_newest_first(start_ms, end_ms, fetch, |c: &Candle| c.open_time_ms).await
 }
 
 // Endpoint methods live here and nowhere else — there are no inherent
