@@ -319,6 +319,30 @@ impl HistoryDb {
         Ok(out)
     }
 
+    /// Sum of `turnover` over the 24 H1 candles ending at `at_ms`, i.e.
+    /// `candles_in_range(symbol, H1, at_ms - 24h + H1, at_ms)` — the `+ H1`
+    /// is what keeps the window to exactly 24 candles rather than 25.
+    ///
+    /// Returns `None`, not `Some(0)`, when the window holds no candles at
+    /// all: absent data is not evidence of zero turnover, and a caller
+    /// ranking symbols must be able to drop such a symbol entirely rather
+    /// than rank it at the bottom as if it were genuinely illiquid.
+    pub async fn rolling_turnover_24h(
+        &self,
+        symbol: &Symbol,
+        at_ms: i64,
+    ) -> Result<Option<Decimal>, HistoryError> {
+        const DAY_MS: i64 = 86_400_000;
+        let start_ms = at_ms - DAY_MS + Timeframe::H1.duration_ms();
+        let candles = self
+            .candles_in_range(symbol, Timeframe::H1, start_ms, at_ms)
+            .await?;
+        if candles.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(candles.iter().map(|c| c.turnover).sum()))
+    }
+
     async fn scalar_i64(
         &self,
         sql: &str,
