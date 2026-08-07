@@ -173,6 +173,37 @@ impl EngineLoop {
         (self.day_start_ms, self.day_start_equity)
     }
 
+    /// Load the drawdown baselines the journal has persisted, so a restart
+    /// does not silently reset them to whatever equity exists at the moment
+    /// the process happens to come back up.
+    ///
+    /// Call once at startup, before any candle is processed. Unlike the
+    /// per-candle journal reads in `account_state`, a failure here is
+    /// surfaced rather than swallowed: this runs before any order has been
+    /// considered, so there is no in-flight decision a loud failure could
+    /// disrupt, and an unreadable baseline is exactly the kind of thing an
+    /// operator must see before trading begins rather than have silently
+    /// treated as "no baseline recorded yet".
+    pub async fn load_baselines(&mut self, now_ms: i64) -> Result<(), Box<dyn std::error::Error>> {
+        let balance = self.client.balance().await?;
+
+        self.high_water_mark = self
+            .journal
+            .high_water_mark()
+            .await?
+            .unwrap_or(balance.equity);
+
+        let day_start = utc_day_start_ms(now_ms);
+        self.day_start_ms = day_start;
+        self.day_start_equity = self
+            .journal
+            .day_start_equity(day_start)
+            .await?
+            .unwrap_or(balance.equity);
+
+        Ok(())
+    }
+
     /// Symbols that must not be dropped from the universe: they hold a
     /// position or a resting order, and losing their candles would leave the
     /// engine unable to manage them.
@@ -265,6 +296,21 @@ impl EngineLoop {
         match self.risk.evaluate(&signal, &state, &instrument, liq) {
             Decision::Refuse(refusal) => {
                 info!(%symbol, refusal = %refusal, "entry refused");
+                // A drawdown breach must survive a restart, so it is
+                // persisted to the journal here rather than living only in
+                // the live `drawdown_breach` check that produced it. Every
+                // other refusal (a daily cap, a size too small, ...) is a
+                // normal, expected outcome and must not halt trading.
+                if matches!(
+                    refusal,
+                    Refusal::DailyDrawdown { .. } | Refusal::TotalDrawdown { .. }
+                ) && let Err(e) = self
+                    .journal
+                    .set_halt(&refusal.to_string(), candle.open_time_ms)
+                    .await
+                {
+                    warn!(%symbol, error = %e, "persisting the drawdown halt failed");
+                }
                 Ok(CandleOutcome::Refused(refusal))
             }
             Decision::Enter(intent) => {
@@ -281,6 +327,15 @@ impl EngineLoop {
     async fn account_state(&mut self, now_ms: i64) -> Result<risk::AccountState, ExchangeError> {
         let balance = self.client.balance().await?;
         let positions = self.client.positions().await?;
+
+        // Record this observation on every evaluation, not just once at
+        // startup — otherwise there is almost nothing for `high_water_mark`
+        // and `day_start_equity` to read back after a restart. A write
+        // failure is logged, never propagated: it must not block a
+        // decision on this candle.
+        if let Err(e) = self.journal.record_equity(balance.equity, now_ms).await {
+            warn!(error = %e, "recording an equity snapshot failed");
+        }
 
         // Recapture the baseline whenever the clock has crossed into a new
         // UTC day, not just once at process start — otherwise the "daily"

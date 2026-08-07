@@ -170,3 +170,44 @@ async fn clearing_the_halt_requires_an_explicit_call() {
     j.clear_halt().await.expect("cleared");
     assert_eq!(j.halt_reason().await.expect("query"), None);
 }
+
+#[tokio::test]
+async fn high_water_mark_compares_equity_numerically_not_lexicographically() {
+    // As strings, "9" > "10000" > "200" — the exact ordering that would come
+    // out of SQL's MAX(equity) on the TEXT column. The true peak is 10000.
+    let (j, _dir) = temp_journal().await;
+    j.record_equity(dec!(9), 1).await.expect("recorded");
+    j.record_equity(dec!(10000), 2).await.expect("recorded");
+    j.record_equity(dec!(200), 3).await.expect("recorded");
+
+    assert_eq!(j.high_water_mark().await.expect("query"), Some(dec!(10000)));
+}
+
+#[tokio::test]
+async fn day_start_equity_returns_the_first_snapshot_of_that_day_not_the_previous_days() {
+    let (j, _dir) = temp_journal().await;
+    let day = 1_700_000_000_000i64 / 86_400_000 * 86_400_000;
+
+    j.record_equity(dec!(9000), day - 1_000)
+        .await
+        .expect("previous day's late snapshot");
+    j.record_equity(dec!(9500), day + 500)
+        .await
+        .expect("first snapshot of the day");
+    j.record_equity(dec!(9800), day + 1_000)
+        .await
+        .expect("a later snapshot the same day");
+
+    assert_eq!(
+        j.day_start_equity(day).await.expect("query"),
+        Some(dec!(9500)),
+        "must return the day's first snapshot, not the previous day's or a later one"
+    );
+}
+
+#[tokio::test]
+async fn high_water_mark_and_day_start_equity_are_none_on_an_empty_table() {
+    let (j, _dir) = temp_journal().await;
+    assert_eq!(j.high_water_mark().await.expect("query"), None);
+    assert_eq!(j.day_start_equity(0).await.expect("query"), None);
+}

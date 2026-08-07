@@ -195,6 +195,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warmup_candles,
     );
 
+    // Seed the drawdown baselines from the journal before anything else can
+    // touch them, so a restart mid-drawdown resumes measuring from the true
+    // all-time peak and the true 00:00 UTC mark rather than snapping both
+    // to whatever equity exists at this moment.
+    engine_loop.load_baselines(rest.clock().now_ms()).await?;
+
     // 5. Reconcile BEFORE any strategy evaluation. A restart, crash or
     //    manual intervention can leave this process believing something
     //    untrue; the exchange settles every disagreement. Resting orders the

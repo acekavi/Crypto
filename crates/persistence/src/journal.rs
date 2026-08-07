@@ -292,6 +292,75 @@ impl Journal {
         Ok(())
     }
 
+    /// The highest equity ever recorded.
+    ///
+    /// The total-drawdown halt measures against the all-time peak, so this must
+    /// survive restarts — otherwise the baseline silently resets to whatever
+    /// equity exists at startup and the halt fires far later than intended.
+    ///
+    /// Equity is stored as TEXT (see `schema`), so SQL's `MAX(equity)` would
+    /// compare lexicographically — `"9" > "10000"` — and could silently
+    /// corrupt the peak. This fetches every snapshot and compares as
+    /// `Decimal` in Rust instead of adding a parallel numeric column to keep
+    /// in sync: the comparison only runs once, at startup, never on the
+    /// per-candle write path, so the O(n) scan costs nothing that matters,
+    /// and there is no derived column that could ever drift from the TEXT
+    /// value it mirrors.
+    pub async fn high_water_mark(&self) -> Result<Option<Decimal>, JournalError> {
+        let mut rows = self
+            .conn
+            .query("SELECT equity FROM equity_snapshots", ())
+            .await?;
+        let mut peak: Option<Decimal> = None;
+        while let Some(row) = rows.next().await? {
+            let text = row
+                .get_value(0)
+                .map_err(|e| JournalError::Db(e.to_string()))?
+                .as_text()
+                .map(|s| s.to_string())
+                .ok_or_else(|| JournalError::Decode("equity is not text".into()))?;
+            let equity = parse_dec(&text, "equity")?;
+            peak = Some(match peak {
+                Some(p) if p >= equity => p,
+                _ => equity,
+            });
+        }
+        Ok(peak)
+    }
+
+    /// Equity as of the first snapshot at or after `day_start_ms`.
+    ///
+    /// The daily-drawdown baseline. Returns None when the day has no snapshot
+    /// yet, which the caller treats as "capture the current equity now".
+    ///
+    /// Ordering here is on `at_ms`, an INTEGER column, so SQL's `ORDER BY`
+    /// compares numerically already — the TEXT lexicographic hazard above
+    /// only applies to comparing `equity` values against each other, which
+    /// this method never does.
+    pub async fn day_start_equity(
+        &self,
+        day_start_ms: i64,
+    ) -> Result<Option<Decimal>, JournalError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT equity FROM equity_snapshots
+                 WHERE at_ms >= ?1 ORDER BY at_ms ASC LIMIT 1",
+                (day_start_ms,),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let text = row
+            .get_value(0)
+            .map_err(|e| JournalError::Db(e.to_string()))?
+            .as_text()
+            .map(|s| s.to_string())
+            .ok_or_else(|| JournalError::Decode("equity is not text".into()))?;
+        Ok(Some(parse_dec(&text, "equity")?))
+    }
+
     pub async fn set_halt(&self, reason: &str, set_at_ms: i64) -> Result<(), JournalError> {
         self.conn
             .execute(

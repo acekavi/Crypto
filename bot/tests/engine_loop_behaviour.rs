@@ -4,7 +4,7 @@ use bot::engine_loop::{CandleOutcome, EngineLoop, SkipReason};
 use botcore::{Candle, Instrument, Symbol, Timeframe};
 use engine::mock::MockExchange;
 use persistence::Journal;
-use risk::{RiskManager, RiskParams};
+use risk::{Refusal, RiskManager, RiskParams};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategy::{PullbackStrategy, pullback::StrategyParams};
@@ -374,5 +374,125 @@ async fn the_day_start_equity_baseline_rolls_over_at_the_utc_day_boundary() {
     assert_eq!(
         rolled_day, day6_start,
         "must roll over to day 6's own start"
+    );
+}
+
+#[tokio::test]
+async fn a_drawdown_refusal_persists_a_halt_that_a_fresh_engine_loop_then_sees() {
+    // Proves the durability fix end-to-end: a live drawdown breach detected
+    // by `on_candle_closed` must be written to the journal, not merely
+    // returned as an in-memory `Refusal` that vanishes the moment the
+    // process restarts.
+    use botcore::Balance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("l.db");
+    let db_path = db_path.to_str().unwrap().to_string();
+
+    // The account is far down from a recorded all-time peak, so the first
+    // signal the engineered setup below produces must be refused for
+    // TotalDrawdown before any sizing is even attempted.
+    let mock = Arc::new(MockExchange::new().with_balance(Balance {
+        equity: dec!(8000),
+        available: dec!(7000),
+    }));
+    let sym = Symbol::new("BTCUSDT");
+
+    let observed_refusal = {
+        let j = Arc::new(Journal::open_local(&db_path).await.expect("journal opens"));
+        j.record_equity(dec!(20000), 0)
+            .await
+            .expect("seed the all-time peak");
+
+        let mut el = EngineLoop::new(
+            Box::new(PullbackStrategy::new(StrategyParams::defaults())),
+            RiskManager::new(RiskParams::defaults(), dec!(0.3)),
+            mock.clone(),
+            j.clone(),
+            vec![instrument()],
+            "cfg".into(),
+            3,
+            250,
+        );
+        el.load_baselines(H1).await.expect("load baselines");
+
+        // Same engineered long setup as
+        // `a_zero_equity_account_refuses_rather_than_placing`: a rising 4h
+        // bias, a 1h pullback into EMA20, and an RSI cross back through the
+        // long trigger, driving the pullback strategy all the way to a real
+        // signal so `risk.evaluate` is actually exercised.
+        let seed: Vec<Candle> = (-249..=0).map(candle).collect();
+        el.warm(&sym, Timeframe::H1, seed.clone());
+        el.warm(&sym, Timeframe::H4, seed);
+
+        const RAMP: i64 = 1040;
+        const DIP: i64 = 14;
+        let mut px = Decimal::from(100);
+        let mut px_h4 = Decimal::from(100);
+        let mut observed_refusal = None;
+
+        for i in 1..=(RAMP + DIP + 1) {
+            let t = i * H1;
+            let h1 = if i <= RAMP {
+                let c = candle_hlc(t, px + dec!(1), px - dec!(1), px);
+                px += dec!(0.5);
+                c
+            } else if i <= RAMP + DIP {
+                px -= dec!(0.5);
+                candle_hlc(t, px + dec!(1), px - dec!(1), px)
+            } else {
+                let close = px + dec!(5);
+                candle_hlc(t, close + dec!(1), close - dec!(2.5), close)
+            };
+
+            let out = el
+                .on_candle_closed(&sym, Timeframe::H1, &h1)
+                .await
+                .expect("handled");
+            if let CandleOutcome::Refused(r) = out {
+                observed_refusal = Some(r);
+            }
+
+            if i % 4 == 0 {
+                let h4 = candle_hlc(t, px_h4 + dec!(1), px_h4 - dec!(1), px_h4);
+                px_h4 += dec!(0.5);
+                el.on_candle_closed(&sym, Timeframe::H4, &h4)
+                    .await
+                    .expect("handled");
+            }
+        }
+
+        observed_refusal
+    };
+
+    let refusal =
+        observed_refusal.expect("the engineered setup must reach risk.evaluate and be refused");
+    assert!(
+        matches!(refusal, Refusal::TotalDrawdown { .. }),
+        "expected a TotalDrawdown refusal, got {refusal:?}"
+    );
+
+    // A fresh EngineLoop over a fresh handle to the SAME database file: this
+    // is the only thing that can prove the halt reached disk rather than
+    // living only in the first EngineLoop's memory.
+    let j2 = Arc::new(
+        Journal::open_local(&db_path)
+            .await
+            .expect("journal reopens"),
+    );
+    let mut el2 = EngineLoop::new(
+        Box::new(PullbackStrategy::new(StrategyParams::defaults())),
+        RiskManager::new(RiskParams::defaults(), dec!(0.3)),
+        mock.clone(),
+        j2,
+        vec![instrument()],
+        "cfg".into(),
+        3,
+        250,
+    );
+    let state = el2.account_state_for_test(H1).await.expect("account state");
+    assert!(
+        state.halt_reason.is_some(),
+        "a fresh EngineLoop must see the halt the first one persisted"
     );
 }
