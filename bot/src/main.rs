@@ -111,6 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let kind = match &e {
                         JournalError::Db(_) => "Db",
                         JournalError::Decode(_) => "Decode",
+                        JournalError::Timeout(_) => "Timeout",
                     };
                     error!(
                         kind,
@@ -319,6 +320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let kind = match &e {
                         JournalError::Db(_) => "Db",
                         JournalError::Decode(_) => "Decode",
+                        JournalError::Timeout(_) => "Timeout",
                     };
                     error!(kind, "final journal push failed");
                 }

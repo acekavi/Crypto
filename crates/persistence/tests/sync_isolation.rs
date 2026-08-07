@@ -1,6 +1,15 @@
+use std::time::Duration;
+
 use botcore::{OrderState, Side, Symbol};
 use persistence::{Journal, OrderRecord};
 use rust_decimal_macros::dec;
+
+/// Longer than `open_synced`'s own internal bound (10s), so a passing test
+/// proves the internal timeout actually fired rather than merely coinciding
+/// with some unrelated cutoff. If `open_synced` ever regresses to hanging
+/// forever, this outer timeout is what turns that into a failing test
+/// instead of a wedged test suite.
+const TEST_BOUND: Duration = Duration::from_secs(30);
 
 /// Invariant 12: a journal configured for a cloud that cannot be reached must
 /// still accept local writes. If this test ever fails, an outage would stop
@@ -11,12 +20,16 @@ async fn local_writes_succeed_when_the_cloud_is_unreachable() {
     let path = dir.path().join("offline.db");
 
     // Point at a URL that cannot resolve.
-    let journal = Journal::open_synced(
-        path.to_str().unwrap(),
-        "libsql://nonexistent-host-for-tests.invalid",
-        "not-a-real-token",
+    let journal = tokio::time::timeout(
+        TEST_BOUND,
+        Journal::open_synced(
+            path.to_str().unwrap(),
+            "libsql://nonexistent-host-for-tests.invalid",
+            "not-a-real-token",
+        ),
     )
-    .await;
+    .await
+    .expect("open_synced must return within its own bounded timeout, never hang");
 
     // Opening may fail outright if the SDK validates connectivity eagerly; in
     // that case the bot must fall back to a local-only journal, which is what

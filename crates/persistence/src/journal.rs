@@ -1,8 +1,21 @@
+use std::time::Duration;
+
 use botcore::{OrderState, Side, Symbol};
 use rust_decimal::Decimal;
 use turso::Connection;
 
 use crate::schema::MIGRATIONS;
+
+/// Bound on opening a synced (cloud-backed) journal: build + connect +
+/// migrate. Turso Cloud calls are ordinary HTTPS requests over a hostname
+/// that can be slow to resolve or simply unreachable; without a bound, an
+/// outage or DNS black hole hangs `open_synced` forever, which — per
+/// `main.rs`'s documented contract — must instead fall back to a local-only
+/// journal within a bounded time. 10s comfortably covers a slow DNS lookup
+/// plus TLS handshake plus the handful of migration statements against a
+/// healthy remote, while still failing fast enough that a bot operator sees
+/// the fallback happen well within a human-noticeable startup delay.
+const SYNC_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
@@ -10,6 +23,12 @@ pub enum JournalError {
     Db(String),
     #[error("decode error: {0}")]
     Decode(String),
+    /// Opening a synced journal did not complete within `SYNC_OPEN_TIMEOUT`.
+    /// Kept distinct from `Db` so callers (and their logs) can tell "the
+    /// remote actively rejected us" apart from "the remote never answered" —
+    /// the two point at different operational fixes.
+    #[error("timed out after {0:?} opening the synced journal")]
+    Timeout(Duration),
 }
 
 impl From<turso::Error> for JournalError {
@@ -102,6 +121,20 @@ impl Journal {
     }
 
     pub async fn open_synced(path: &str, url: &str, token: &str) -> Result<Self, JournalError> {
+        match tokio::time::timeout(SYNC_OPEN_TIMEOUT, Self::open_synced_inner(path, url, token))
+            .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(JournalError::Timeout(SYNC_OPEN_TIMEOUT)),
+        }
+    }
+
+    /// The unbounded build+connect+migrate sequence, split out so
+    /// `open_synced` can wrap the whole thing — not just the network build —
+    /// in one timeout. An unreachable or slow-DNS host can hang inside
+    /// `build()` indefinitely otherwise, which per `main.rs`'s contract must
+    /// never be a reason the bot refuses to start.
+    async fn open_synced_inner(path: &str, url: &str, token: &str) -> Result<Self, JournalError> {
         let db = turso::sync::Builder::new_remote(path)
             .with_remote_url(url)
             .with_auth_token(token)
