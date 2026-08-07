@@ -263,3 +263,178 @@ async fn a_full_round_trip_reproduces_the_hand_computed_oracle() {
     let bal = sim.balance().await.expect("balance");
     assert_eq!(bal.equity, dec!(10197.46), "starting equity plus net pnl");
 }
+
+/// A candle whose close differs from the default 100, so a funding period
+/// charged at this candle is visibly distinguishable from one charged at
+/// another.
+fn candle_closing_at(
+    open_time_ms: i64,
+    high: rust_decimal::Decimal,
+    low: rust_decimal::Decimal,
+    close: rust_decimal::Decimal,
+) -> Candle {
+    Candle {
+        open_time_ms,
+        open: dec!(100),
+        high,
+        low,
+        close,
+        volume: dec!(1),
+        turnover: dec!(1),
+    }
+}
+
+fn funding_at(sym: &Symbol, at_ms: i64, rate: rust_decimal::Decimal) -> FundingRate {
+    FundingRate {
+        symbol: sym.clone(),
+        funding_time_ms: at_ms,
+        rate,
+    }
+}
+
+#[tokio::test]
+async fn funding_is_charged_at_each_candles_own_close_not_all_at_the_exit_price() {
+    // The bias this guards against is SYSTEMATIC, not random: pricing a whole
+    // hold at the exit mark means a winning long has every funding period
+    // marked up, and the error grows with hold time — exactly the regime a
+    // swing strategy operates in.
+    //
+    // Long 50 units. Three funding periods at 0.0001, each falling in a
+    // candle with a different close:
+    //   period 1 @ close 100 -> 50 * 100 * 0.0001 = 0.50
+    //   period 2 @ close 120 -> 50 * 120 * 0.0001 = 0.60
+    //   period 3 @ close 140 -> 50 * 140 * 0.0001 = 0.70
+    //   total                                     = 1.80
+    // Charging all three at the exit close (140) would give 2.10 — the
+    // number this test exists to reject.
+    let sym = Symbol::new("BTCUSDT");
+    let sim = SimulatedExchange::new(
+        dec!(10000),
+        vec![instrument(&sym)],
+        CostModel {
+            maker_fee_rate: dec!(0.0002),
+        },
+    );
+
+    sim.place_limit_entry(oracle_entry(&sym, "accrual-1"))
+        .await
+        .expect("placed");
+    // Entry fills here; nothing is charged for the entry candle itself.
+    sim.advance(&sym, &candle_at(0, dec!(101), dec!(99)), &[]);
+
+    let rates = vec![
+        funding_at(&sym, 10, dec!(0.0001)),
+        funding_at(&sym, 20, dec!(0.0001)),
+        funding_at(&sym, 30, dec!(0.0001)),
+    ];
+
+    // Each candle settles the one period that fell due since the last one.
+    sim.advance(
+        &sym,
+        &candle_closing_at(10, dec!(101), dec!(99), dec!(100)),
+        &rates,
+    );
+    sim.advance(
+        &sym,
+        &candle_closing_at(20, dec!(101), dec!(99), dec!(120)),
+        &rates,
+    );
+    // The third candle also trades through the target, closing the position.
+    let closed = sim.advance(
+        &sym,
+        &candle_closing_at(30, dec!(105), dec!(100.5), dec!(140)),
+        &rates,
+    );
+
+    assert_eq!(closed.len(), 1);
+    assert_eq!(
+        closed[0].funding,
+        dec!(1.80),
+        "each period must be marked at its own candle's close, not all at the exit price (2.10)"
+    );
+}
+
+#[tokio::test]
+async fn a_funding_timestamp_on_a_candle_boundary_is_charged_exactly_once() {
+    // The spans are half-open — (last_funded_ms, open_time_ms] — so a
+    // timestamp landing exactly on a boundary belongs to one candle and one
+    // only. Dropping it understates costs; charging it twice overstates them.
+    let sym = Symbol::new("BTCUSDT");
+    let sim = SimulatedExchange::new(
+        dec!(10000),
+        vec![instrument(&sym)],
+        CostModel {
+            maker_fee_rate: dec!(0.0002),
+        },
+    );
+
+    sim.place_limit_entry(oracle_entry(&sym, "boundary-1"))
+        .await
+        .expect("placed");
+    sim.advance(&sym, &candle_at(0, dec!(101), dec!(99)), &[]);
+
+    // Exactly on the second candle's open time.
+    let rates = vec![funding_at(&sym, 10, dec!(0.0001))];
+
+    sim.advance(
+        &sym,
+        &candle_closing_at(10, dec!(101), dec!(99), dec!(100)),
+        &rates,
+    );
+    // Passing the same rate slice again must not charge it a second time.
+    let closed = sim.advance(
+        &sym,
+        &candle_closing_at(20, dec!(105), dec!(100.5), dec!(100)),
+        &rates,
+    );
+
+    assert_eq!(closed.len(), 1);
+    assert_eq!(
+        closed[0].funding,
+        dec!(0.5),
+        "one period at mark 100 = 0.5; charged twice would be 1.0, dropped would be 0"
+    );
+}
+
+#[tokio::test]
+async fn a_position_is_not_charged_for_funding_that_predates_its_entry() {
+    // The rate fell due before this position existed. Charging it would
+    // attribute another period's cost to this trade.
+    let sym = Symbol::new("BTCUSDT");
+    let sim = SimulatedExchange::new(
+        dec!(10000),
+        vec![instrument(&sym)],
+        CostModel {
+            maker_fee_rate: dec!(0.0002),
+        },
+    );
+
+    sim.place_limit_entry(oracle_entry(&sym, "predate-1"))
+        .await
+        .expect("placed");
+
+    // Funding at 5 and at the entry candle's own open time (10); neither may
+    // be charged to a position that opens at 10.
+    let rates = vec![
+        funding_at(&sym, 5, dec!(0.0001)),
+        funding_at(&sym, 10, dec!(0.0001)),
+    ];
+
+    sim.advance(
+        &sym,
+        &candle_closing_at(10, dec!(101), dec!(99), dec!(100)),
+        &rates,
+    );
+    let closed = sim.advance(
+        &sym,
+        &candle_closing_at(20, dec!(105), dec!(100.5), dec!(100)),
+        &rates,
+    );
+
+    assert_eq!(closed.len(), 1);
+    assert_eq!(
+        closed[0].funding,
+        dec!(0),
+        "both timestamps precede or coincide with entry"
+    );
+}

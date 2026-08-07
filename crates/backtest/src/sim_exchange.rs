@@ -20,7 +20,7 @@ use exchange::bybit::transport::ExchangeError;
 use exchange::bybit::wire::{FundingRate, Ticker};
 use rust_decimal::Decimal;
 
-use crate::costs::{CostModel, funding_charge, funding_timestamps_in};
+use crate::costs::{CostModel, funding_charge};
 use crate::fills::{ExitOutcome, exit_was_ambiguous, limit_fill, resolve_exit};
 
 /// Why a position closed. `ClosedTrade` carries this rather than callers
@@ -64,6 +64,14 @@ struct OpenPosition {
     entry_ms: i64,
     stop_limit_price: Decimal,
     take_profit: Decimal,
+    /// Funding charged so far, accrued candle by candle at the mark that
+    /// applied when each period fell due rather than re-priced at exit.
+    accrued_funding: Decimal,
+    /// High-water mark of funding already settled. Each `advance` charges the
+    /// half-open span `(last_funded_ms, candle.open_time_ms]`, and because
+    /// candles are contiguous those spans tile the hold exactly — every
+    /// funding timestamp falls in one of them, and none falls in two.
+    last_funded_ms: i64,
 }
 
 #[derive(Debug, Default)]
@@ -122,14 +130,12 @@ impl SimulatedExchange {
     /// cannot support. Checking the pre-existing position first, before any
     /// new position can be opened, is what keeps that assumption out.
     ///
-    /// `funding` is filtered to timestamps strictly inside the closing
-    /// position's hold (`entry_ms` to this candle's `open_time_ms`) and
-    /// priced at this candle's close — the only mark available to a single
-    /// `advance` call. `costs::funding_charge`'s doc comment prefers the
-    /// close of the candle a given funding timestamp actually falls in;
-    /// this candle's close is the closest available substitute without
-    /// `SimulatedExchange` retaining a full price history, which the
-    /// interface this task was given does not ask for.
+    /// Funding is accrued incrementally rather than settled in one lump at
+    /// exit: each call charges the timestamps falling in
+    /// `(last_funded_ms, candle.open_time_ms]` at THIS candle's close, which
+    /// is what the spec asks for and needs no price history. Pricing a whole
+    /// hold at the exit mark instead would bias every trade the same
+    /// direction — see the accrual block for why that is worse than noise.
     pub fn advance(
         &self,
         symbol: &Symbol,
@@ -138,6 +144,25 @@ impl SimulatedExchange {
     ) -> Vec<ClosedTrade> {
         let mut state = self.state.lock().expect("sim exchange lock");
         let mut newly_closed = Vec::new();
+
+        // Accrue funding BEFORE resolving the exit, and at THIS candle's
+        // close. Charging a whole hold at the exit price instead would bias
+        // systematically rather than randomly: a winning long exits higher
+        // than it entered, so every one of its funding periods would be
+        // marked up, and the error grows with hold time — precisely the
+        // regime a swing strategy holding for days operates in.
+        if let Some(pos) = state.positions.get_mut(symbol) {
+            let charge: Decimal = funding
+                .iter()
+                .filter(|r| {
+                    pos.last_funded_ms < r.funding_time_ms
+                        && r.funding_time_ms <= candle.open_time_ms
+                })
+                .map(|r| funding_charge(pos.side, pos.qty, candle.close, r.rate))
+                .sum();
+            pos.accrued_funding += charge;
+            pos.last_funded_ms = candle.open_time_ms;
+        }
 
         if let Some(pos) = state.positions.get(symbol).cloned() {
             let outcome = resolve_exit(pos.side, pos.stop_limit_price, pos.take_profit, candle);
@@ -158,10 +183,9 @@ impl SimulatedExchange {
                 let exit_fee = self.costs.maker_fee(pos.qty, exit_price);
                 let fees = entry_fee + exit_fee;
                 let exit_ms = candle.open_time_ms;
-                let funding_total: Decimal = funding_timestamps_in(pos.entry_ms, exit_ms, funding)
-                    .into_iter()
-                    .map(|r| funding_charge(pos.side, pos.qty, candle.close, r.rate))
-                    .sum();
+                // Already settled candle by candle above; nothing is re-priced
+                // at exit.
+                let funding_total = pos.accrued_funding;
                 let net_pnl = gross_pnl - fees - funding_total;
 
                 // The entry fee was already debited from equity when the
@@ -221,6 +245,11 @@ impl SimulatedExchange {
                         entry_ms: candle.open_time_ms,
                         stop_limit_price: entry.stop_limit_price,
                         take_profit: entry.take_profit,
+                        accrued_funding: Decimal::ZERO,
+                        // Seeded at the entry candle's open so a funding
+                        // timestamp at or before entry is never charged to a
+                        // position that was not yet open for it.
+                        last_funded_ms: candle.open_time_ms,
                     },
                 );
             }
