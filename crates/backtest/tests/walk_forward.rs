@@ -376,3 +376,55 @@ async fn a_tie_in_sample_keeps_the_earlier_grid_entry() {
         "the tie follows the declared order, so reversing the grid reverses the pick"
     );
 }
+
+#[tokio::test]
+async fn the_reported_drawdown_is_the_worst_fold_not_the_concatenation() {
+    // Concatenating every fold's trades onto ONE starting equity produces a
+    // curve that never existed: each fold really began at that equity
+    // independently. On a losing strategy the synthetic curve runs negative
+    // and reports drawdowns above 100% — 137% and 218% were both produced
+    // this way. A number that cannot be true must not reach the gate.
+    let (db, _dir) = temp_db().await;
+    let sym = Symbol::new("BTCUSDT");
+    // Enough history for several folds, all losing.
+    let candles: Vec<Candle> = (0..40).map(|i| losing_candle(i * H1)).collect();
+    db.insert_candles(&sym, Timeframe::H1, &candles)
+        .await
+        .expect("insert");
+
+    let windows = vec![(10usize, 0i64, 40 * H1)];
+    let grid = vec![params(10)];
+    let cfg = base_cfg(&sym, 0, 40 * H1);
+
+    let result = run_walk_forward(
+        &db,
+        &cfg,
+        &tiny_wf(),
+        &grid,
+        &RiskParams::defaults(),
+        dec!(0.3),
+        &|p| Box::new(TaggedStrategy::for_params(p, &windows)),
+    )
+    .await
+    .expect("walk forward");
+
+    assert!(result.folds.len() > 1, "need several folds to concatenate");
+
+    let worst_fold = result
+        .folds
+        .iter()
+        .map(|f| f.oos_metrics.max_drawdown_pct)
+        .max()
+        .expect("folds");
+    assert_eq!(
+        result.oos_metrics.max_drawdown_pct, worst_fold,
+        "the reported drawdown must be the worst single fold"
+    );
+    // And it must be a figure that can actually happen.
+    assert!(
+        result.oos_metrics.max_drawdown_pct <= Decimal::ONE_HUNDRED,
+        "a drawdown above 100% means equity went negative, which no real \
+         account trajectory does: got {}",
+        result.oos_metrics.max_drawdown_pct
+    );
+}

@@ -187,7 +187,25 @@ pub async fn run_walk_forward(
 
     // Computed over the concatenated out-of-sample trades — never over any
     // in-sample run, and never over the two mixed together.
-    let oos_metrics = compute(&oos_trades, cfg.starting_equity);
+    let mut oos_metrics = compute(&oos_trades, cfg.starting_equity);
+
+    // Drawdown is the one metric that CANNOT be read off the concatenation.
+    // `compute` walks every fold's trades onto a single starting equity, but
+    // each fold actually began at that equity independently, so a losing run
+    // drives the synthetic curve below zero and reports impossible figures —
+    // 137% and 218% were both produced this way before this fix.
+    //
+    // The honest question the 15% limit asks is "did the account ever fall
+    // more than 15% from its peak", and each fold IS a real account
+    // trajectory. So the worst single fold is the answer; the concatenated
+    // figure is replaced rather than reported alongside, because a number
+    // that cannot be true has no business in the output at all.
+    oos_metrics.max_drawdown_pct = fold_results
+        .iter()
+        .map(|f| f.oos_metrics.max_drawdown_pct)
+        .max()
+        .unwrap_or(Decimal::ZERO);
+
     Ok(WalkForwardResult {
         folds: fold_results,
         oos_trades,
