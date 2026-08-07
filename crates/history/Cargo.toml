@@ -1,0 +1,20 @@
+[package]
+name = "history"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+botcore = { path = "../botcore" }
+exchange = { path = "../exchange" }
+rust_decimal.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# NOT a workspace dependency — `crates/persistence` declares it directly and
+# this must match it exactly, or two libSQL versions end up linked at once.
+turso = { version = "0.7.2", features = ["sync"] }
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+tempfile = "3"
