@@ -1,7 +1,12 @@
 # ICT H4 Sweep → M15 FVG
 
-**Status: REJECTED.** Validated once on the 330-day holdout and failed. Not approved for testnet or
-live trading, and not to be re-tested — the holdout is spent.
+**Status: REJECTED, and superseded.** Validated once on the 330-day holdout and failed. Not approved
+for testnet or live trading, and not to be re-tested — the holdout is spent.
+
+**Superseded by [`ict-liquidity-sweep-v2.md`](ict-liquidity-sweep-v2.md)**, which keeps this setup
+detection unchanged and alters only the reward multiple (3 → 5) and the breakeven stop (none → 2R).
+The holdout this configuration consumed **cannot be reused for v2**: v2 was selected on the research
+window, so it has no out-of-sample validation of its own.
 
 | | Research (selection) | Holdout (unseen) |
 |---|---|---|
