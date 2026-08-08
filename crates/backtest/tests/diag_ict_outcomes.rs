@@ -53,7 +53,6 @@ async fn diag_ict_outcomes() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     println!(
@@ -70,15 +69,13 @@ async fn diag_ict_outcomes() {
         ("NY  1:2 BE@1R", true, Decimal::TWO, Some(Decimal::ONE)),
         ("NY  1:3 BE@1R", true, Decimal::from(3), Some(Decimal::ONE)),
     ] {
-        let cfg = BacktestConfig {
-            breakeven_at_r: be,
-            ..cfg.clone()
-        };
         for want in ["A", "C", "E"] {
             let base = variants.iter().find(|(n, _)| *n == want).unwrap().1.clone();
+            // The threshold rides on the strategy now, not on the run config.
             let p = IctParams {
                 session_filter: session,
                 reward_multiple: rr,
+                breakeven_at_r: be,
                 ..base
             };
             let r = run_backtest(

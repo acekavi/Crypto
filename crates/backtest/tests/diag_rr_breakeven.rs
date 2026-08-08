@@ -53,22 +53,18 @@ async fn diag_rr_breakeven() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 12,
-        breakeven_at_r: None,
     };
     println!("DIAG  R:R   BE@    n     win%    exp      PF       maxDD   net");
     for rr in [3i64, 4, 5, 6] {
         for be in [None, Some(dec!(1)), Some(dec!(2))] {
             let p = IctParams {
                 reward_multiple: Decimal::from(rr),
-                ..IctParams::liquidity_sweep_v1()
-            };
-            let cfg = BacktestConfig {
                 breakeven_at_r: be,
-                ..base.clone()
+                ..IctParams::liquidity_sweep_v1()
             };
             let r = run_backtest(
                 &db,
-                &cfg,
+                &base,
                 Box::new(IctStrategy::new(p)),
                 RiskManager::new(RiskParams::defaults(), dec!(0.3)),
             )

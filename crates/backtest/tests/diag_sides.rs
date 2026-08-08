@@ -53,7 +53,6 @@ async fn diag_sides() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 12,
-        breakeven_at_r: None,
     };
     let v1 = IctParams::liquidity_sweep_v1();
     let cases = [
@@ -86,13 +85,14 @@ async fn diag_sides() {
         ),
     ];
     for (label, p, be) in cases {
-        let cfg = BacktestConfig {
+        // The threshold rides on the strategy now, not on the run config.
+        let p = IctParams {
             breakeven_at_r: be,
-            ..base.clone()
+            ..p
         };
         let r = run_backtest(
             &db,
-            &cfg,
+            &base,
             Box::new(IctStrategy::new(p)),
             RiskManager::new(RiskParams::defaults(), dec!(0.3)),
         )

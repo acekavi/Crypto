@@ -1,4 +1,11 @@
-// DIAGNOSTIC — widen the stop, let the target follow, hold risk at 1%.
+// DIAGNOSTIC — the frozen `liquidity_sweep_v2` result, reproduced end to end.
+//
+// The reference figures this must print are n=298, win 24.2%, PF 1.457,
+// maxDD 17.1%, net 18008 over the research window on the eight validated
+// symbols. They were measured while the breakeven threshold lived on
+// `BacktestConfig`; it now rides on the `Signal`, and moving it must have
+// changed nothing. A different number here means the refactor changed
+// behaviour, not that the number needs updating.
 use backtest::metrics::compute;
 use backtest::{BacktestConfig, CostModel, run_backtest};
 use botcore::{Instrument, Symbol};
@@ -12,7 +19,7 @@ const DB: &str = "/var/home/acekavi/Projects/Crypto/data/history.db";
 
 #[tokio::test]
 #[ignore = "slow diagnostic; run explicitly"]
-async fn diag_widen() {
+async fn diag_v2_baseline() {
     let db = HistoryDb::open_local(DB).await.expect("db");
     let series = db.stored_series().await.expect("series");
     let syms: Vec<Symbol> = [
@@ -54,34 +61,33 @@ async fn diag_widen() {
         warmup_candles: 250,
         entry_expiry_candles: 12,
     };
-    println!("DIAG stop_x  target_x  n     win%    exp      PF       maxDD   net");
-    for m in ["1.0", "1.25", "1.5", "2.0", "2.5", "3.0"] {
-        let mult: Decimal = m.parse().unwrap();
-        let p = IctParams {
-            stop_widen_multiple: mult,
-            ..IctParams::liquidity_sweep_v1()
-        };
-        let r = run_backtest(
-            &db,
-            &cfg,
-            Box::new(IctStrategy::new(p)),
-            RiskManager::new(RiskParams::defaults(), dec!(0.3)),
-        )
-        .await
-        .expect("run");
-        let met = compute(&r.trades, dec!(10000));
-        println!(
-            "DIAG {:<7} {:<9} {:<5} {:<7} {:<8} {:<8} {:<7} {}",
-            m,
-            (mult * dec!(3)).normalize(),
-            met.trade_count,
-            (met.win_rate * Decimal::ONE_HUNDRED).round_dp(1),
-            met.expectancy.round_dp(2),
-            met.profit_factor
-                .map(|v| v.round_dp(3).to_string())
-                .unwrap_or_else(|| "undef".into()),
-            met.max_drawdown_pct.round_dp(1),
-            met.net_pnl.round_dp(0)
-        );
-    }
+    let rp = RiskParams {
+        max_concurrent_positions: 8,
+        max_daily_entries: 5,
+        total_drawdown_halt_pct: dec!(0.20),
+        ..RiskParams::defaults()
+    };
+
+    let r = run_backtest(
+        &db,
+        &cfg,
+        // No breakeven argument anywhere: the strategy carries it.
+        Box::new(IctStrategy::new(IctParams::liquidity_sweep_v2())),
+        RiskManager::new(rp, dec!(0.3)),
+    )
+    .await
+    .expect("run");
+    let m = compute(&r.trades, dec!(10000));
+
+    println!("DIAG expect  n=298  win=24.2  PF=1.457  maxDD=17.1  net=18008");
+    println!(
+        "DIAG actual  n={}  win={}  PF={}  maxDD={}  net={}",
+        m.trade_count,
+        (m.win_rate * Decimal::ONE_HUNDRED).round_dp(1),
+        m.profit_factor
+            .map(|v| v.round_dp(3).to_string())
+            .unwrap_or_else(|| "undef".into()),
+        m.max_drawdown_pct.round_dp(1),
+        m.net_pnl.round_dp(0)
+    );
 }

@@ -94,6 +94,19 @@ struct OpenPosition {
     /// Original risk per unit, entry to stop-limit. Fixed at fill, so moving
     /// the stop later cannot change what 1R meant.
     initial_risk: Decimal,
+    /// Pull the stop to entry once price has travelled this many R in favour,
+    /// taken from the `LimitEntry` that opened the position and therefore from
+    /// the strategy's own `Signal`. `None` leaves the stop where it was placed.
+    ///
+    /// Per position rather than per simulator so the backtester cannot hold an
+    /// opinion the live engine does not share: the strategy is the only thing
+    /// that says when a stop moves.
+    ///
+    /// The tradeoff is real and measured rather than assumed: it removes the
+    /// loss on trades that go your way and then reverse, but converts what
+    /// would have been winners into scratches whenever price retraces to entry
+    /// before continuing.
+    breakeven_at_r: Option<Decimal>,
     /// Whether the stop has already been pulled to breakeven.
     moved_to_breakeven: bool,
 }
@@ -119,31 +132,14 @@ struct State {
 pub struct SimulatedExchange {
     instruments: Vec<Instrument>,
     costs: CostModel,
-    /// Pull the stop to entry once price has travelled this many R in favour.
-    ///
-    /// `None` leaves the stop where it was placed. The tradeoff is real and
-    /// measured rather than assumed: it removes the loss on trades that go
-    /// your way and then reverse, but converts what would have been winners
-    /// into scratches whenever price retraces to entry before continuing.
-    breakeven_at_r: Option<Decimal>,
     state: Mutex<State>,
 }
 
 impl SimulatedExchange {
     pub fn new(starting_equity: Decimal, instruments: Vec<Instrument>, costs: CostModel) -> Self {
-        Self::with_breakeven(starting_equity, instruments, costs, None)
-    }
-
-    pub fn with_breakeven(
-        starting_equity: Decimal,
-        instruments: Vec<Instrument>,
-        costs: CostModel,
-        breakeven_at_r: Option<Decimal>,
-    ) -> Self {
         SimulatedExchange {
             instruments,
             costs,
-            breakeven_at_r,
             state: Mutex::new(State {
                 equity: starting_equity,
                 resting: HashMap::new(),
@@ -262,8 +258,8 @@ impl SimulatedExchange {
         }
 
         // Still open after this candle: consider pulling the stop to entry.
-        if let Some(threshold) = self.breakeven_at_r
-            && let Some(pos) = state.positions.get_mut(symbol)
+        if let Some(pos) = state.positions.get_mut(symbol)
+            && let Some(threshold) = pos.breakeven_at_r
             && !pos.moved_to_breakeven
             && pos.initial_risk > Decimal::ZERO
         {
@@ -326,6 +322,7 @@ impl SimulatedExchange {
                         stop_limit_price: entry.stop_limit_price,
                         take_profit: entry.take_profit,
                         initial_risk: (entry.price - entry.stop_limit_price).abs(),
+                        breakeven_at_r: entry.breakeven_at_r,
                         moved_to_breakeven: false,
                         accrued_funding: Decimal::ZERO,
                         // Seeded at the entry candle's open so a funding

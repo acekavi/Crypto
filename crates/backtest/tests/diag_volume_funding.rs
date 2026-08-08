@@ -89,7 +89,6 @@ async fn diag_volume_and_funding_vs_outcome() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 12,
-        breakeven_at_r: None,
     };
 
     let r = run_backtest(

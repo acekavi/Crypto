@@ -48,7 +48,6 @@ async fn diag_position_caps_and_risk() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 12,
-        breakeven_at_r: None,
     };
 
     let p = IctParams::liquidity_sweep_v1();

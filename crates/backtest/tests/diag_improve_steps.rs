@@ -72,7 +72,6 @@ async fn diag_improvement_steps() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
     let h4m15 = IctParams {
         execution_tf: Timeframe::M15,

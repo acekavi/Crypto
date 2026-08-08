@@ -207,7 +207,6 @@ async fn the_same_inputs_replayed_twice_produce_identical_results() {
         costs: costs(),
         warmup_candles: 5,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     let first = run_backtest(&db, &cfg, Box::new(SignalOnceStrategy::new()), risk())
@@ -248,7 +247,6 @@ async fn candles_from_two_symbols_are_replayed_in_global_time_order_not_grouped_
         costs: costs(),
         warmup_candles: 1,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -295,7 +293,6 @@ async fn no_trade_opens_before_warmup_candles_have_been_fed() {
         costs: costs(),
         warmup_candles: 5,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     let result = run_backtest(&db, &cfg, Box::new(SignalOnceStrategy::new()), risk())
@@ -335,7 +332,6 @@ async fn a_strategy_that_never_signals_produces_zero_trades_and_exactly_starting
         costs: costs(),
         warmup_candles: 3,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     let strategy = NeverSignalStrategy {
@@ -372,7 +368,6 @@ async fn a_gap_in_stored_data_refuses_the_run_instead_of_replaying_across_it() {
         costs: costs(),
         warmup_candles: 1,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     let strategy = NeverSignalStrategy {
@@ -429,7 +424,6 @@ async fn the_symbol_order_in_the_config_does_not_change_the_result() {
         costs: costs(),
         warmup_candles: 5,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
     let reversed = BacktestConfig {
         symbols: vec![bbb.clone(), aaa.clone()],
@@ -516,7 +510,6 @@ async fn a_position_settles_only_against_h1_candles_when_the_strategy_also_decla
         costs: costs(),
         warmup_candles: 0,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     let strategy = SignalOnceStrategy {
@@ -569,7 +562,6 @@ async fn h1_and_h4_both_reach_the_strategy_and_h1_is_delivered_first_at_a_shared
         costs: costs(),
         warmup_candles: 0,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -643,7 +635,6 @@ async fn multi_timeframe_symbol_order_in_the_config_does_not_change_the_result()
         costs: costs(),
         warmup_candles: 5,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
     let reversed = BacktestConfig {
         symbols: vec![bbb.clone(), aaa.clone()],

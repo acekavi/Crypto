@@ -55,7 +55,6 @@ async fn diag_rr5_breakdown() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 12,
-        breakeven_at_r: None,
     };
 
     for (label, rr, be) in [
@@ -64,15 +63,12 @@ async fn diag_rr5_breakdown() {
     ] {
         let p = IctParams {
             reward_multiple: Decimal::from(rr),
-            ..IctParams::liquidity_sweep_v1()
-        };
-        let cfg = BacktestConfig {
             breakeven_at_r: be,
-            ..base.clone()
+            ..IctParams::liquidity_sweep_v1()
         };
         let r = run_backtest(
             &db,
-            &cfg,
+            &base,
             Box::new(IctStrategy::new(p)),
             RiskManager::new(RiskParams::defaults(), dec!(0.3)),
         )

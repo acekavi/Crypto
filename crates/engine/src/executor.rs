@@ -55,6 +55,7 @@ impl Executor {
             stop_loss: intent.stop_price,
             stop_limit_price: intent.stop_limit_price,
             take_profit: intent.target_price,
+            breakeven_at_r: intent.breakeven_at_r,
         };
 
         let ack = self.client.place_limit_entry(req).await?;

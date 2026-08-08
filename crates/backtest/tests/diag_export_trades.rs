@@ -52,7 +52,6 @@ async fn diag_export_trades() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 12,
-        breakeven_at_r: None,
     };
     let r = run_backtest(
         &db,

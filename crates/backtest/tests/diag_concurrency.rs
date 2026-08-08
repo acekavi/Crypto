@@ -53,10 +53,10 @@ async fn diag_concurrency() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 12,
-        breakeven_at_r: Some(dec!(2)),
     };
     let p = IctParams {
         reward_multiple: Decimal::from(5),
+        breakeven_at_r: Some(dec!(2)),
         ..IctParams::liquidity_sweep_v1()
     };
     println!("DIAG maxconc  dailycap  n     win%    exp      PF       maxDD   net");

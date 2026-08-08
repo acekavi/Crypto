@@ -38,6 +38,7 @@ fn oracle_entry(sym: &Symbol, link_id: &str) -> LimitEntry {
         stop_loss: dec!(98),
         stop_limit_price: dec!(98),
         take_profit: dec!(104),
+        breakeven_at_r: None,
     }
 }
 
@@ -230,6 +231,7 @@ async fn a_full_round_trip_reproduces_the_hand_computed_oracle() {
         stop_loss: dec!(98),
         stop_limit_price: dec!(98),
         take_profit: dec!(104),
+        breakeven_at_r: None,
     })
     .await
     .expect("placed");
@@ -470,6 +472,7 @@ async fn with_several_resting_orders_the_one_price_reaches_first_fills() {
             stop_loss: price - dec!(5),
             stop_limit_price: price - dec!(5),
             take_profit: price + dec!(10),
+            breakeven_at_r: None,
         })
         .await
         .expect("placed");
@@ -508,6 +511,7 @@ async fn a_sell_side_pick_is_the_lowest_limit_price_reaches_first() {
             stop_loss: price + dec!(5),
             stop_limit_price: price + dec!(5),
             take_profit: price - dec!(10),
+            breakeven_at_r: None,
         })
         .await
         .expect("placed");
@@ -534,6 +538,7 @@ fn entry_at(link: &str, side: Side, price: rust_decimal::Decimal) -> LimitEntry 
         stop_loss: price,
         stop_limit_price: price,
         take_profit: price,
+        breakeven_at_r: None,
     }
 }
 
@@ -605,15 +610,16 @@ fn no_candidates_means_no_fill() {
     assert!(backtest::best_fillable(&mut v).is_none());
 }
 
-/// A simulator that pulls the stop to entry once price travels 1R in favour.
-fn sim_with_breakeven(sym: &Symbol) -> SimulatedExchange {
-    SimulatedExchange::with_breakeven(
+/// The simulator holds no breakeven setting of its own — the entries placed
+/// below carry `breakeven_at_r: Some(dec!(1))`, so each trade arms at 1R
+/// because its own signal said so.
+fn sim_for_breakeven_tests(sym: &Symbol) -> SimulatedExchange {
+    SimulatedExchange::new(
         dec!(100000),
         vec![instrument(sym)],
         CostModel {
             maker_fee_rate: dec!(0.0002),
         },
-        Some(dec!(1)),
     )
 }
 
@@ -623,7 +629,7 @@ async fn reaching_one_r_pulls_the_stop_to_entry() {
     // A later candle that dips to 99 must now close the trade AT ENTRY
     // rather than running on to the old stop at 95.
     let sym = Symbol::new("BTCUSDT");
-    let sim = sim_with_breakeven(&sym);
+    let sim = sim_for_breakeven_tests(&sym);
     sim.place_limit_entry(LimitEntry {
         symbol: sym.clone(),
         side: Side::Buy,
@@ -633,6 +639,7 @@ async fn reaching_one_r_pulls_the_stop_to_entry() {
         stop_loss: dec!(95),
         stop_limit_price: dec!(95),
         take_profit: dec!(120),
+        breakeven_at_r: Some(dec!(1)),
     })
     .await
     .expect("placed");
@@ -660,7 +667,7 @@ async fn reaching_one_r_pulls_the_stop_to_entry() {
 async fn breakeven_does_not_arm_before_one_r() {
     // Travels only to 104 against a 1R of 5. The stop must stay at 95.
     let sym = Symbol::new("BTCUSDT");
-    let sim = sim_with_breakeven(&sym);
+    let sim = sim_for_breakeven_tests(&sym);
     sim.place_limit_entry(LimitEntry {
         symbol: sym.clone(),
         side: Side::Buy,
@@ -670,6 +677,7 @@ async fn breakeven_does_not_arm_before_one_r() {
         stop_loss: dec!(95),
         stop_limit_price: dec!(95),
         take_profit: dec!(120),
+        breakeven_at_r: Some(dec!(1)),
     })
     .await
     .expect("placed");
@@ -694,7 +702,7 @@ async fn a_candle_that_reaches_one_r_and_the_stop_resolves_as_a_full_loss() {
     // scratch. Applying breakeven before resolving the exit would silently
     // turn every such loss into a free trade.
     let sym = Symbol::new("BTCUSDT");
-    let sim = sim_with_breakeven(&sym);
+    let sim = sim_for_breakeven_tests(&sym);
     sim.place_limit_entry(LimitEntry {
         symbol: sym.clone(),
         side: Side::Buy,
@@ -704,6 +712,7 @@ async fn a_candle_that_reaches_one_r_and_the_stop_resolves_as_a_full_loss() {
         stop_loss: dec!(95),
         stop_limit_price: dec!(95),
         take_profit: dec!(120),
+        breakeven_at_r: Some(dec!(1)),
     })
     .await
     .expect("placed");
@@ -722,7 +731,7 @@ async fn a_candle_that_reaches_one_r_and_the_stop_resolves_as_a_full_loss() {
 #[tokio::test]
 async fn a_short_moves_to_breakeven_on_a_downward_move() {
     let sym = Symbol::new("BTCUSDT");
-    let sim = sim_with_breakeven(&sym);
+    let sim = sim_for_breakeven_tests(&sym);
     sim.place_limit_entry(LimitEntry {
         symbol: sym.clone(),
         side: Side::Sell,
@@ -732,6 +741,7 @@ async fn a_short_moves_to_breakeven_on_a_downward_move() {
         stop_loss: dec!(105),
         stop_limit_price: dec!(105),
         take_profit: dec!(80),
+        breakeven_at_r: Some(dec!(1)),
     })
     .await
     .expect("placed");

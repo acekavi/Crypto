@@ -23,6 +23,10 @@ pub struct OrderIntent {
     pub target_price: Decimal,
     pub atr: Decimal,
     pub signal_candle_open_ms: i64,
+    /// Copied verbatim from the signal. Sizing never touches it — the strategy
+    /// decides when a stop moves to entry, and this layer only carries that
+    /// decision forward to whoever manages the position.
+    pub breakeven_at_r: Option<Decimal>,
 }
 
 /// The outcome of evaluating one signal.
@@ -225,6 +229,7 @@ impl RiskManager {
             target_price: round_stop_to_tick(target, instrument.tick_size, signal.side.opposite()),
             atr: signal.atr,
             signal_candle_open_ms: signal.signal_candle_open_ms,
+            breakeven_at_r: signal.breakeven_at_r,
         })
     }
 }

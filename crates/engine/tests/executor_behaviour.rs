@@ -28,6 +28,7 @@ fn intent() -> OrderIntent {
         target_price: dec!(44000),
         atr: dec!(200),
         signal_candle_open_ms: 1_700_000_000_000,
+        breakeven_at_r: None,
     }
 }
 

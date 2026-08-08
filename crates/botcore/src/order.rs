@@ -43,6 +43,17 @@ pub struct LimitEntry {
     pub stop_loss: Decimal,
     pub stop_limit_price: Decimal,
     pub take_profit: Decimal,
+    /// Multiple of initial risk at which the stop moves to entry, carried from
+    /// the `Signal` that produced this order. `None` leaves the stop fixed for
+    /// the life of the trade.
+    ///
+    /// Not sent to the exchange — Bybit has no such order type, so the rule is
+    /// driven by amending the stop. It rides here because this is the only
+    /// record that survives from the signal to the moment the entry fills, and
+    /// whoever manages the position afterwards (the live engine, or the
+    /// simulator) must read the same number the strategy chose rather than a
+    /// second copy of it kept somewhere else.
+    pub breakeven_at_r: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

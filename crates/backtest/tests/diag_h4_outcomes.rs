@@ -49,7 +49,6 @@ async fn diag_h4_outcomes() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     let req = IctParams::h4_sweep_m5_entry();
@@ -103,13 +102,14 @@ async fn diag_h4_outcomes() {
 
     println!("DIAG {} days, research window only\n", (end - start) / DAY);
     for (label, p, be) in configs {
-        let cfg = BacktestConfig {
+        // The threshold rides on the strategy now, not on the run config.
+        let p = IctParams {
             breakeven_at_r: be,
-            ..base.clone()
+            ..p
         };
         let r = run_backtest(
             &db,
-            &cfg,
+            &base,
             Box::new(IctStrategy::new(p)),
             RiskManager::new(RiskParams::defaults(), dec!(0.3)),
         )

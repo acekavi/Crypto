@@ -72,7 +72,6 @@ async fn diag_h4m15_robustness() {
         },
         warmup_candles: 250,
         entry_expiry_candles: 3,
-        breakeven_at_r: None,
     };
 
     let (n, net, exp, pf) = run(&db, &base, winner()).await;

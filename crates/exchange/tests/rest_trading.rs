@@ -23,6 +23,7 @@ fn entry() -> LimitEntry {
         stop_loss: dec!(41000),
         stop_limit_price: dec!(40900),
         take_profit: dec!(44001),
+        breakeven_at_r: None,
     }
 }
 

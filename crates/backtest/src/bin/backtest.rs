@@ -238,7 +238,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         costs: CostModel { maker_fee_rate },
         warmup_candles: 250,
         entry_expiry_candles: if args.study == "sweep" { 12 } else { 3 },
-        breakeven_at_r: None,
     };
 
     let wf = WalkForwardConfig::defaults();
