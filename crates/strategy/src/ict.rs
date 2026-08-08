@@ -384,7 +384,21 @@ impl IctStrategy {
             params: params.clone(),
             funnel: Funnel::default(),
             per_symbol: HashMap::new(),
-            timeframes: vec![Timeframe::M15, Timeframe::H1, Timeframe::H4, Timeframe::D1],
+            // The union of the CONFIGURED roles, not a fixed list. A variant
+            // sweeping on H4 needs H4 once, not twice, and one executing on M5
+            // must actually subscribe to M5 — otherwise the engine never
+            // delivers those candles and the setup can never fire.
+            timeframes: {
+                let mut tfs = vec![
+                    params.execution_tf,
+                    params.structure_tf,
+                    Timeframe::H4,
+                    Timeframe::D1,
+                ];
+                tfs.sort_by_key(|t| t.duration_ms());
+                tfs.dedup();
+                tfs
+            },
         }
     }
 }
@@ -479,7 +493,19 @@ fn track_structure(p: &IctParams, state: &mut SymbolState, candle: &Candle, f: &
             Direction::Bearish => candle.high,
         };
         f.sweeps += 1;
-        state.pending_sweep = Some((direction, extreme, state.h1_seen));
+        if p.require_mss {
+            state.pending_sweep = Some((direction, extreme, state.h1_seen));
+        } else {
+            // The sweep alone arms the setup. `extreme` is still the sweep
+            // candle's own low or high, so a zero ATR buffer puts the stop
+            // exactly on the level price rejected.
+            f.mss_armed += 1;
+            state.armed = Some(ArmedSetup {
+                direction,
+                sweep_extreme: extreme,
+                armed_at: state.h1_seen,
+            });
+        }
     }
 }
 

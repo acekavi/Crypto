@@ -1,4 +1,4 @@
-use botcore::Candle;
+use botcore::{Candle, Timeframe};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use strategy::ict::{
@@ -260,4 +260,28 @@ fn the_declared_variants_are_exactly_the_six_in_the_spec() {
             "variant {name} must change exactly one field"
         );
     }
+}
+
+#[test]
+fn the_configured_roles_drive_which_timeframes_are_subscribed() {
+    // A REGRESSION GUARD. `timeframes()` was hardcoded to [M15, H1, H4, D1]
+    // while the params claimed to configure the roles, so a variant executing
+    // on M5 never received a single M5 candle and could not fire at all. The
+    // funnel showed it as execCandles=0 and I nearly reported that as "the
+    // setup is rare" rather than "the wiring is broken".
+    use strategy::Strategy;
+    use strategy::ict::IctStrategy;
+
+    let registered = IctStrategy::new(IctParams::variant_a());
+    assert_eq!(
+        registered.timeframes(),
+        &[Timeframe::M15, Timeframe::H1, Timeframe::H4, Timeframe::D1]
+    );
+
+    let requested = IctStrategy::new(IctParams::h4_sweep_m5_entry());
+    assert_eq!(
+        requested.timeframes(),
+        &[Timeframe::M5, Timeframe::H4, Timeframe::D1],
+        "H4 serves as both bias and structure, so it appears once, and M5 must be present"
+    );
 }
