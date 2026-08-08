@@ -62,12 +62,18 @@ async fn diag_ict_outcomes() {
     );
     let variants = IctParams::declared_variants();
 
-    for (label, session, rr) in [
-        ("NY  1:2", true, Decimal::TWO),
-        ("24h 1:2", false, Decimal::TWO),
-        ("NY  1:3", true, Decimal::from(3)),
-        ("24h 1:3", false, Decimal::from(3)),
+    for (label, session, rr, be) in [
+        ("24h 1:2 no-BE", false, Decimal::TWO, None),
+        ("24h 1:2 BE@1R", false, Decimal::TWO, Some(Decimal::ONE)),
+        ("24h 1:3 no-BE", false, Decimal::from(3), None),
+        ("24h 1:3 BE@1R", false, Decimal::from(3), Some(Decimal::ONE)),
+        ("NY  1:2 BE@1R", true, Decimal::TWO, Some(Decimal::ONE)),
+        ("NY  1:3 BE@1R", true, Decimal::from(3), Some(Decimal::ONE)),
     ] {
+        let cfg = BacktestConfig {
+            breakeven_at_r: be,
+            ..cfg.clone()
+        };
         for want in ["A", "C", "E"] {
             let base = variants.iter().find(|(n, _)| *n == want).unwrap().1.clone();
             let p = IctParams {
@@ -89,19 +95,26 @@ async fn diag_ict_outcomes() {
                 .iter()
                 .filter(|t| t.exit_reason == ExitReason::Target)
                 .count();
+            // A breakeven exit realises exactly zero gross, so counting these
+            // shows directly how many would-be outcomes the rule converted.
+            let scratches = r
+                .trades
+                .iter()
+                .filter(|t| t.gross_pnl == Decimal::ZERO)
+                .count();
             let pf = m
                 .profit_factor
                 .map(|v| v.round_dp(3).to_string())
                 .unwrap_or_else(|| "undef".into());
             println!(
-                "DIAG {label} {want}: n={:<4} win%={:<6} targets={:<4} exp={:<11} PF={:<8} net={:<10} fees={}",
+                "DIAG {label} {want}: n={:<4} win%={:<6} tgt={:<3} scratch={:<3} exp={:<11} PF={:<8} net={:<10}",
                 m.trade_count,
                 (m.win_rate * Decimal::ONE_HUNDRED).round_dp(1),
                 tgt,
+                scratches,
                 m.expectancy.round_dp(2),
                 pf,
-                m.net_pnl.round_dp(2),
-                m.total_fees.round_dp(2)
+                m.net_pnl.round_dp(2)
             );
         }
         println!();
