@@ -142,23 +142,38 @@ turning a nominal 1:2 into a realised 1.60 and silently moving the breakeven win
 
 ---
 
-## 4. Parameters
+## 4. Parameters — best known configuration
 
 | Parameter | Value | Meaning |
 |---|---|---|
 | `structure_tf` | `H4` | Where sweeps are detected |
-| `execution_tf` | `M15` | Where FVGs are found and entries placed |
+| `execution_tf` | `M15` | Where entries are placed |
 | `bias_ema` | 50 | D1 and H4 bias EMA period |
 | `swing_lookback` | 5 | Candles either side of a swing point |
 | `require_mss` | `false` | Structure shift not required |
-| `fvg_entry_fraction` | 0.50 | Depth into the gap |
+| **`use_pdh_pdl`** | **`true`** | **Also sweep previous-day extremes** |
+| `use_session_levels` | `false` | Session extremes rejected — see §5.2 |
+| **`use_order_block`** | **`true`** | **Fall back to an order block when no FVG** |
+| **`ob_lookback`** | **5** | Execution candles searched for an order block |
+| `fvg_entry_fraction` | 0.50 | Depth into the zone |
 | `stop_buffer_atr` | 0.00 | Stop exactly at the sweep extreme |
 | `atr_period` | 14 | ATR period on the execution timeframe |
 | `reward_multiple` | 3 | Target as a multiple of R |
 | `session_filter` | `false` | No session restriction |
-| `mss_window` | 12 | Setup lifetime in structure candles (still governs expiry) |
+| `entry_expiry_candles` | **12** | Backtest config, not a strategy param |
 
-Constructed by `IctParams { execution_tf: Timeframe::M15, ..IctParams::h4_sweep_m5_entry() }`.
+Constructed as:
+
+```rust
+IctParams {
+    execution_tf: Timeframe::M15,
+    use_pdh_pdl: true,
+    use_order_block: true,
+    ob_lookback: 5,
+    ..IctParams::h4_sweep_m5_entry()
+}
+// with BacktestConfig { entry_expiry_candles: 12, .. }
+```
 
 ### Inherited risk rules — not configurable here
 
@@ -179,18 +194,56 @@ These live in `RiskManager` and are applied identically to every strategy, live 
 history. Maker fee 0.02%, funding charged from real history. The final 330 days are **excluded and
 have never been queried**.
 
-### Baseline
+### 5.1 How the configuration was reached — each change measured alone
+
+Starting point was 28 trades. Every change below was applied and measured
+individually, so the marginal contribution of each is visible rather than only
+the combined result. **Two of the four proposed changes were rejected.**
+
+| Change | n | win% | PF | maxDD | net | Verdict |
+|---|---|---|---|---|---|---|
+| Baseline (expiry 3) | 28 | 35.7 | 1.556 | 6.9% | +1,114 | — |
+| Entry expiry → 12 | 41 | 36.6 | 1.573 | 12.6% | +1,807 | **adopt** |
+| + PDH/PDL | 119 | 38.7 | 1.670 | 16.0% | +7,765 | **adopt** |
+| + order block (5) | **200** | 35.5 | **1.470** | 16.3% | **+10,546** | **adopt** |
+| + session levels | 633 | 29.2 | 1.162 | 27.2% | +9,869 | **reject** |
+| Sweep on H1 not H4 | 66 | 21.2 | 0.762 | 16.6% | −1,227 | **reject** |
+
+**28 → 200 trades, profit factor holding at 1.47.**
+
+### 5.2 Why the two rejections matter
+
+**Session levels** produce the most trades (633) and the highest raw profit,
+and are still the wrong choice: profit factor collapses to 1.162 — below the
+1.3 gate — and drawdown reaches 27%, well past the 15% limit. More trades, much
+worse trades.
+
+**Sweeping on H1** was expected to be a cheap win and is not. It gives more
+trades and *destroys* the edge (PF 0.762, net −1,227). The 4-hour sweep level is
+load-bearing: a 4h swing is a level participants watch, an hourly one is noise.
+
+Worth recording that this was predicted wrong. H1 was ranked "low risk, already
+measured" — and it *had* been measured, at net −958 in an earlier table. The
+data was available and the recommendation was made anyway. Measuring one change
+at a time is what caught it.
+
+### 5.3 The best configuration
 
 ```
-trades          28
-win rate        35.7%
-profit factor   1.556
-expectancy      +39.78 per trade
-net             +1,113.86 on 10,000 starting equity
-max drawdown    6.9%
+trades          200
+win rate        35.5%
+profit factor   1.470
+expectancy      +52.73 per trade
+net             +10,546 on 10,000 starting equity
+max drawdown    16.3%
 ```
 
 Breakeven at a true 1:3 is 25%.
+
+There is a second candidate worth keeping: **without** the order block fallback
+the same config gives 119 trades at PF **1.670** and drawdown 16.0%. Order
+blocks buy 81 trades for 0.2 of profit factor. Neither dominates — it is sample
+size against quality, and both clear the 1.3 bar.
 
 ### Robustness — the reason this is a candidate at all
 
@@ -261,8 +314,22 @@ The pass bar would be the pre-registered gate with the study's tightened benchma
 expectancy > 0, ≥200 trades, max drawdown ≤ 15%, profit factor ≥ 1.3, and beating the 99.17th
 percentile of 500 seeded random-entry runs.
 
-**The trade-count criterion will almost certainly fail** — 330 days will not produce 200 trades at
-this frequency. That is a real and honest outcome, not a technicality to waive.
+**Two criteria are at risk before the run even starts, and both should be understood now:**
+
+**Drawdown.** The best configuration measures 16.3% on a single full-window pass,
+above the 15% limit. That is not the same measure the gate uses — the gate takes
+the worst *fold* of a walk-forward, where each fold restarts at its own equity —
+but it is close enough to the line to fail on this criterion alone.
+
+**Trade count.** 200 trades came from 769 days. The holdout is 330 days, roughly
+43% of that, so it should produce **around 85–110 trades** — well short of the
+200 the gate requires. The criterion cannot be met on a window that short at this
+frequency.
+
+That is a structural problem with testing this strategy against this gate, not a
+technicality to waive. The options are to accept that the holdout cannot satisfy
+a 200-trade bar and say so explicitly, or to design a different validation. What
+must **not** happen is quietly lowering the threshold after seeing the result.
 
 ---
 
