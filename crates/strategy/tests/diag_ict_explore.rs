@@ -11,6 +11,11 @@ const DB: &str = "/var/home/acekavi/Projects/Crypto/data/history.db";
 const HOLDOUT_DAYS: i64 = 330;
 const DAY: i64 = 86_400_000;
 
+/// One symbol's candles across every timeframe, pre-merged and pre-sorted so
+/// the configuration sweep below can replay them many times without redoing
+/// the load.
+type SymbolTicks = (Symbol, Instrument, Vec<(Timeframe, botcore::Candle)>);
+
 #[tokio::test]
 // Diagnostic, not a guarantee: it replays the whole research window and takes
 // minutes in a debug build. Run explicitly with
@@ -33,7 +38,7 @@ async fn diag_ict_session_and_rr() {
     symbols.dedup();
 
     // Pre-load once; the inner loop runs many configurations over it.
-    let mut per_symbol: Vec<(Symbol, Instrument, Vec<(Timeframe, botcore::Candle)>)> = Vec::new();
+    let mut per_symbol: Vec<SymbolTicks> = Vec::new();
     for sym in &symbols {
         let inst = Instrument {
             symbol: sym.clone(),
