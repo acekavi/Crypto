@@ -22,7 +22,9 @@ pub enum ParamError {
     NotFinite(&'static str),
 }
 
-fn dec(value: f64, field: &'static str) -> Result<Decimal, ParamError> {
+/// Shared with `ict_params_from_config`, which validates the same class of
+/// `f64` config knob and must reject the same values the same way.
+pub(crate) fn dec(value: f64, field: &'static str) -> Result<Decimal, ParamError> {
     if !value.is_finite() {
         return Err(ParamError::NotFinite(field));
     }
