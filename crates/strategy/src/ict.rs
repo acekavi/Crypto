@@ -100,6 +100,10 @@ pub struct IctParams {
     /// study of trades. Turning it off is the single change that materially
     /// raises setup frequency.
     pub require_mss: bool,
+    /// Multiplies the entry-to-stop distance. 1 leaves the stop at the sweep
+    /// extreme; 2 puts it twice as far and halves the position for the same
+    /// account risk.
+    pub stop_widen_multiple: Decimal,
     /// Which directions may trade. Both by default.
     pub allow_long: bool,
     pub allow_short: bool,
@@ -132,6 +136,7 @@ impl IctParams {
             use_session_levels: false,
             use_order_block: false,
             ob_lookback: 10,
+            stop_widen_multiple: Decimal::ONE,
             allow_long: true,
             allow_short: true,
             session_filter: true,
@@ -797,10 +802,16 @@ fn evaluate_m15(
 
     let entry_price = fvg_entry_price(&fvg, setup.direction, p.fvg_entry_fraction);
     let buffer = atr * p.stop_buffer_atr;
-    let stop_price = match setup.direction {
+    let raw_stop = match setup.direction {
         Direction::Bullish => setup.sweep_extreme - buffer,
         Direction::Bearish => setup.sweep_extreme + buffer,
     };
+
+    // Push the stop further from entry without changing the reward multiple.
+    // The target is derived from the stop distance below, so widening here
+    // moves it out proportionally and the 1:R ratio is preserved; position
+    // size shrinks by the same factor because risk stays a fixed % of equity.
+    let stop_price = entry_price + (raw_stop - entry_price) * p.stop_widen_multiple;
 
     // A stop on the wrong side of the entry cannot be sized, and would mean
     // price had already invalidated the setup before the gap formed.
