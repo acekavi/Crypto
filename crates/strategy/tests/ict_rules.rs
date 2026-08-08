@@ -401,3 +401,20 @@ fn a_bearish_order_block_is_the_last_up_candle() {
         })
     );
 }
+
+#[test]
+fn the_consolidated_strategy_carries_exactly_what_survived_measurement() {
+    // A tripwire. Each field below was decided by measuring one change at a
+    // time; silently flipping one would change the strategy without changing
+    // the evidence that justified it.
+    let p = IctParams::liquidity_sweep_v1();
+    assert_eq!(p.structure_tf, Timeframe::H4, "H1 sweeps lost money");
+    assert_eq!(p.execution_tf, Timeframe::M15);
+    assert!(!p.require_mss, "only 3.2% of sweeps ever confirmed one");
+    assert!(p.use_pdh_pdl, "tripled trades and raised profit factor");
+    assert!(!p.use_session_levels, "PF 1.16 and 27% drawdown");
+    assert!(p.use_order_block, "119 -> 200 trades");
+    assert_eq!(p.ob_lookback, 5);
+    assert_eq!(p.reward_multiple, dec!(3));
+    assert_eq!(p.stop_buffer_atr, dec!(0), "stop sits at the swept level");
+}

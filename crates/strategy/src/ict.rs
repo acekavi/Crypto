@@ -158,6 +158,43 @@ impl IctParams {
         }
     }
 
+    /// The consolidated strategy: every change that survived measurement,
+    /// none that did not.
+    ///
+    /// Reached by testing four proposed improvements ONE AT A TIME on the
+    /// research window. Two were adopted and two rejected, and the rejections
+    /// matter as much as the adoptions:
+    ///
+    ///   ADOPTED  entry expiry 3 -> 12 execution candles   28 -> 41 trades
+    ///   ADOPTED  previous-day high/low as liquidity       41 -> 119 trades
+    ///   ADOPTED  order-block fallback when no FVG        119 -> 200 trades
+    ///   REJECTED session extremes as liquidity   PF 1.16, drawdown 27%
+    ///   REJECTED sweeping on H1 rather than H4   PF 0.76, net negative
+    ///
+    /// Measured over 769 days and 8 symbols: 200 trades, 35.5% win rate,
+    /// profit factor 1.470, and a 16.3% single-pass drawdown that sits ABOVE
+    /// the owner's 15% limit and is the clearest open risk in this design.
+    ///
+    /// These numbers are IN-SAMPLE in the sense that matters: the parameters
+    /// were chosen by searching this window. They are a starting point for
+    /// validation, not evidence of an edge.
+    pub fn liquidity_sweep_v1() -> Self {
+        IctParams {
+            structure_tf: Timeframe::H4,
+            execution_tf: Timeframe::M15,
+            require_mss: false,
+            use_pdh_pdl: true,
+            // Rejected on measurement: many more trades, materially worse.
+            use_session_levels: false,
+            use_order_block: true,
+            ob_lookback: 5,
+            stop_buffer_atr: Decimal::ZERO,
+            reward_multiple: Decimal::from(3),
+            session_filter: false,
+            ..Self::variant_a()
+        }
+    }
+
     /// The six pre-declared variants. Each changes exactly ONE field from A,
     /// so a difference in results is attributable to that field.
     pub fn declared_variants() -> Vec<(&'static str, Self)> {

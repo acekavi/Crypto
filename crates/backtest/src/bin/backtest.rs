@@ -129,8 +129,10 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     if holdout_only && holdout_days <= 0 {
         return Err("--holdout-only requires --holdout-days".into());
     }
-    if study != "pullback" && study != "reversion" && study != "ict" {
-        return Err(format!("--study must be pullback, reversion or ict, got {study:?}").into());
+    if !["pullback", "reversion", "ict", "sweep"].contains(&study.as_str()) {
+        return Err(
+            format!("--study must be pullback, reversion, ict or sweep, got {study:?}").into(),
+        );
     }
     Ok(Args {
         db_path,
@@ -224,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         instruments: symbols.iter().map(placeholder_instrument).collect(),
         costs: CostModel { maker_fee_rate },
         warmup_candles: 250,
-        entry_expiry_candles: 3,
+        entry_expiry_candles: if args.study == "sweep" { 12 } else { 3 },
         breakeven_at_r: None,
     };
 
@@ -271,23 +273,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stop_offset = Decimal::new(3, 1);
     let reversion = args.study == "reversion";
     let ict = args.study == "ict";
+    let sweep = args.study == "sweep";
 
     // Six declared variants means six chances to find noise, so the study
     // raises its own benchmark bar and estimates it from more runs.
     // Both pre-registered studies select one variant from six, so both raise
     // the benchmark bar by the same Bonferroni argument.
-    let thresholds = if reversion || ict {
+    let thresholds = if reversion || ict || sweep {
         GateThresholds::mean_reversion_study()
     } else {
         GateThresholds::pre_registered()
     };
-    let seed_count: u64 = if reversion || ict { 500 } else { 100 };
+    let seed_count: u64 = if reversion || ict || sweep { 500 } else { 100 };
 
     println!("\nrunning walk-forward over {} folds...", available.len());
     // The reversion study sweeps its six declared variants and reports each,
     // so a selection is made on evidence rather than on one number. Stage 2
     // passes --variant to send exactly ONE of them to the holdout.
-    let (wf_result, chosen_label, grid_size) = if ict {
+    let (wf_result, chosen_label, grid_size) = if sweep {
+        // ONE configuration, no variant sweep: everything in it was already
+        // selected by measuring changes individually. Running a grid here
+        // would be selecting twice on the same data.
+        let p = IctParams::liquidity_sweep_v1();
+        println!("study        : consolidated liquidity sweep (v1)");
+        println!("variants     : 1 (no search — the config is fixed)");
+        let r = run_walk_forward(
+            &db,
+            &cfg,
+            &wf,
+            std::slice::from_ref(&p),
+            &risk_params,
+            stop_offset,
+            &|q| Box::new(IctStrategy::new(q.clone())),
+        )
+        .await?;
+        (summarise_folds(&r), "liquidity_sweep_v1".to_string(), 1)
+    } else if ict {
         let mut declared = IctParams::declared_variants();
         if let Some(want) = &args.variant {
             declared.retain(|(name, _)| name.eq_ignore_ascii_case(want));
