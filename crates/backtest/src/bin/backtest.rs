@@ -11,10 +11,10 @@ use std::collections::HashSet;
 use backtest::gate::{GateThresholds, evaluate};
 use backtest::random_entry::{percentile, run_benchmark};
 use backtest::walk_forward::{WalkForwardConfig, folds, run_walk_forward};
-use backtest::{BacktestConfig, CostModel};
+use backtest::{BacktestConfig, CostModel, run_backtest};
 use botcore::{Instrument, Symbol, Timeframe};
 use history::HistoryDb;
-use risk::RiskParams;
+use risk::{RiskManager, RiskParams};
 use rust_decimal::Decimal;
 use strategy::ict::{IctParams, IctStrategy};
 use strategy::pullback::{PullbackStrategy, StrategyParams};
@@ -88,6 +88,14 @@ struct Args {
     /// Run ON the reserved block instead of excluding it. For the ONE
     /// validation run, after the research is finished and frozen.
     holdout_only: bool,
+    /// Score one frozen configuration over the whole range in a single pass,
+    /// with no walk-forward.
+    ///
+    /// The walk-forward exists to stop parameters being tuned on the data they
+    /// are scored against. When the configuration is frozen there is nothing to
+    /// tune, and on a short window a walk-forward would fit one fold and score
+    /// a fraction of the available days.
+    single_pass: bool,
     /// Which pre-registered study to run. `pullback` is the original
     /// (failed) baseline; `reversion` sweeps the six declared variants.
     study: String,
@@ -101,6 +109,7 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     let mut starting_equity = Decimal::from(10_000);
     let mut holdout_days = 0i64;
     let mut holdout_only = false;
+    let mut single_pass = false;
     let mut study = "pullback".to_string();
     let mut variant: Option<String> = None;
 
@@ -121,6 +130,7 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
                     .map_err(|_| format!("--holdout-days value \"{v}\" is not an integer"))?;
             }
             "--holdout-only" => holdout_only = true,
+            "--single-pass" => single_pass = true,
             "--study" => study = args.next().ok_or("--study requires a value")?,
             "--variant" => variant = Some(args.next().ok_or("--variant requires a value")?),
             other => return Err(format!("unrecognised argument: {other}").into()),
@@ -139,6 +149,7 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
         starting_equity,
         holdout_days,
         holdout_only,
+        single_pass,
         study,
         variant,
     })
@@ -290,7 +301,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The reversion study sweeps its six declared variants and reports each,
     // so a selection is made on evidence rather than on one number. Stage 2
     // passes --variant to send exactly ONE of them to the holdout.
-    let (wf_result, chosen_label, grid_size) = if sweep {
+    let (wf_result, chosen_label, grid_size) = if sweep && args.single_pass {
+        let p = IctParams::liquidity_sweep_v1();
+        println!("study        : consolidated liquidity sweep (v1)");
+        println!("method       : SINGLE PASS, frozen config, no walk-forward");
+        let r = run_backtest(
+            &db,
+            &cfg,
+            Box::new(IctStrategy::new(p)),
+            RiskManager::new(risk_params.clone(), stop_offset),
+        )
+        .await?;
+        let m = backtest::metrics::compute(&r.trades, cfg.starting_equity);
+        (
+            RunOutcome {
+                oos_metrics: m,
+                // One pass has no folds to break down.
+                fold_lines: Vec::new(),
+            },
+            "liquidity_sweep_v1".to_string(),
+            1,
+        )
+    } else if sweep {
         // ONE configuration, no variant sweep: everything in it was already
         // selected by measuring changes individually. Running a grid here
         // would be selecting twice on the same data.

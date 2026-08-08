@@ -26,6 +26,17 @@ const TIMEFRAMES: [Timeframe; 5] = [
 ];
 
 struct Args {
+    /// Download only the daily series.
+    ///
+    /// A cross-sectional study at a daily horizon needs nothing finer, and the
+    /// intraday series are two orders of magnitude larger.
+    daily_only: bool,
+    /// Omit the 5-minute series.
+    ///
+    /// M5 is by far the largest pull — roughly 317 pages per symbol against 2
+    /// for daily — and only an execution-timeframe study needs it. A universe
+    /// scan for cross-sectional work does not.
+    skip_m5: bool,
     symbols: Vec<Symbol>,
     days: i64,
     profile: Profile,
@@ -37,6 +48,8 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     let mut days: Option<i64> = None;
     let mut profile_name = "testnet".to_string();
     let mut db_path = "data/history.db".to_string();
+    let mut skip_m5 = false;
+    let mut daily_only = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -55,6 +68,8 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
             "--profile" => {
                 profile_name = args.next().ok_or("--profile requires a value")?;
             }
+            "--skip-m5" => skip_m5 = true,
+            "--daily-only" => daily_only = true,
             "--db" => {
                 db_path = args.next().ok_or("--db requires a value")?;
             }
@@ -72,6 +87,8 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     let profile = Profile::from_name(&profile_name)?;
 
     Ok(Args {
+        daily_only,
+        skip_m5,
         symbols,
         days,
         profile,
@@ -147,7 +164,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => warn!(%symbol, error = %e, "funding history download failed"),
         }
 
-        for &tf in &TIMEFRAMES {
+        for &tf in TIMEFRAMES.iter().filter(|t| {
+            if args.daily_only {
+                **t == Timeframe::D1
+            } else {
+                !(args.skip_m5 && **t == Timeframe::M5)
+            }
+        }) {
             let report = download_symbol(&rest, &db, symbol, tf, start_ms, end_ms).await?;
             info!(
                 %symbol,

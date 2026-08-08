@@ -100,6 +100,9 @@ pub struct IctParams {
     /// study of trades. Turning it off is the single change that materially
     /// raises setup frequency.
     pub require_mss: bool,
+    /// Which directions may trade. Both by default.
+    pub allow_long: bool,
+    pub allow_short: bool,
     /// Target as a multiple of risk.
     ///
     /// EXPLORATORY above 2. The owner's standing rule is 1:2, and the
@@ -129,6 +132,8 @@ impl IctParams {
             use_session_levels: false,
             use_order_block: false,
             ob_lookback: 10,
+            allow_long: true,
+            allow_short: true,
             session_filter: true,
             reward_multiple: Decimal::TWO,
         }
@@ -740,6 +745,13 @@ fn evaluate_m15(
 
     let setup = state.armed.clone()?;
     f.setup_active += 1;
+    let allowed = match setup.direction {
+        Direction::Bullish => p.allow_long,
+        Direction::Bearish => p.allow_short,
+    };
+    if !allowed {
+        return None;
+    }
 
     // EXPIRY FIRST, before any other gate can return early.
     //
