@@ -232,6 +232,26 @@ pub fn in_ny_session(open_time_ms: i64, open_ms: i64, close_ms: i64) -> bool {
     ms_into_day >= open_ms && ms_into_day < close_ms
 }
 
+/// How many candidates survive each stage of the setup.
+///
+/// Counters only — they never gate anything, so instrumenting cannot change
+/// what the strategy does. Counting inside the real state machine rather than
+/// a reimplementation matters: a parallel copy would measure a subtly
+/// different thing, which is the whole failure mode being investigated.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Funnel {
+    pub h1_candles: usize,
+    pub sweeps: usize,
+    pub mss_armed: usize,
+    pub m15_candles: usize,
+    pub in_session: usize,
+    pub setup_active: usize,
+    pub bias_aligned: usize,
+    pub not_expired: usize,
+    pub fvg_found: usize,
+    pub signals: usize,
+}
+
 // ---------------------------------------------------------- the machine ----
 
 /// A confirmed sweep-and-shift waiting for a gap to enter.
@@ -290,14 +310,21 @@ impl SymbolState {
 
 pub struct IctStrategy {
     params: IctParams,
+    funnel: Funnel,
     per_symbol: HashMap<Symbol, SymbolState>,
     timeframes: Vec<Timeframe>,
 }
 
 impl IctStrategy {
+    /// Stage-by-stage survival counts, for diagnosing WHERE setups die.
+    pub fn funnel(&self) -> Funnel {
+        self.funnel
+    }
+
     pub fn new(params: IctParams) -> Self {
         IctStrategy {
             params,
+            funnel: Funnel::default(),
             per_symbol: HashMap::new(),
             timeframes: vec![Timeframe::M15, Timeframe::H1, Timeframe::H4, Timeframe::D1],
         }
@@ -344,16 +371,17 @@ impl Strategy for IctStrategy {
                 None
             }
             Timeframe::H1 => {
-                track_structure(&p, state, candle);
+                track_structure(&p, state, candle, &mut self.funnel);
                 None
             }
-            Timeframe::M15 => evaluate_m15(&p, state, ctx),
+            Timeframe::M15 => evaluate_m15(&p, state, ctx, &mut self.funnel),
         }
     }
 }
 
 /// Advance H1 structure: find swings, detect a sweep, then a shift.
-fn track_structure(p: &IctParams, state: &mut SymbolState, candle: &Candle) {
+fn track_structure(p: &IctParams, state: &mut SymbolState, candle: &Candle, f: &mut Funnel) {
+    f.h1_candles += 1;
     // Confirmed swings from the window BEFORE this candle, so the levels a
     // sweep is measured against are ones that already existed.
     let (prior_high, prior_low) = confirmed_swings(&state.h1, p.swing_lookback);
@@ -375,6 +403,7 @@ fn track_structure(p: &IctParams, state: &mut SymbolState, candle: &Candle) {
     if let Some((direction, extreme, _)) = state.pending_sweep
         && is_mss(direction, candle.close, prior_high, prior_low)
     {
+        f.mss_armed += 1;
         state.armed = Some(ArmedSetup {
             direction,
             sweep_extreme: extreme,
@@ -389,6 +418,7 @@ fn track_structure(p: &IctParams, state: &mut SymbolState, candle: &Candle) {
             Direction::Bullish => candle.low,
             Direction::Bearish => candle.high,
         };
+        f.sweeps += 1;
         state.pending_sweep = Some((direction, extreme, state.h1_seen));
     }
 }
@@ -412,8 +442,14 @@ fn confirmed_swings(h1: &VecDeque<Candle>, lookback: usize) -> (Option<Decimal>,
     (high, low)
 }
 
-fn evaluate_m15(p: &IctParams, state: &mut SymbolState, ctx: &MarketContext) -> Option<Signal> {
+fn evaluate_m15(
+    p: &IctParams,
+    state: &mut SymbolState,
+    ctx: &MarketContext,
+    f: &mut Funnel,
+) -> Option<Signal> {
     let candle = ctx.candle;
+    f.m15_candles += 1;
     let atr = state.atr_m15.update(candle);
 
     state.m15.push_back(candle.clone());
@@ -428,18 +464,32 @@ fn evaluate_m15(p: &IctParams, state: &mut SymbolState, ctx: &MarketContext) -> 
     if !in_ny_session(candle.open_time_ms, p.ny_open_ms, p.ny_close_ms) {
         return None;
     }
+    f.in_session += 1;
 
     let setup = state.armed.clone()?;
+    f.setup_active += 1;
+
+    // EXPIRY FIRST, before any other gate can return early.
+    //
+    // This check used to sit after the bias comparison, which meant a setup
+    // whose bias never aligned never reached it — and so was never cleared.
+    // It stayed armed indefinitely and could fire months later, long after
+    // the sweep and structure shift that justified it had stopped being
+    // relevant. The funnel exposed it: 54 armed setups accounted for 16,116
+    // armed-and-in-session candles, roughly 300 each against a window worth
+    // 48.
+    if state.h1_seen.saturating_sub(setup.armed_at) > p.mss_window {
+        state.armed = None;
+        return None;
+    }
+    f.not_expired += 1;
+
     let bias = state.aligned_bias()?;
     // The structural setup and both higher timeframes must point the same way.
     if bias != setup.direction {
         return None;
     }
-    // A setup that never found a gap expires with its sweep's window.
-    if state.h1_seen.saturating_sub(setup.armed_at) > p.mss_window {
-        state.armed = None;
-        return None;
-    }
+    f.bias_aligned += 1;
 
     if state.m15.len() < 3 {
         return None;
@@ -447,6 +497,7 @@ fn evaluate_m15(p: &IctParams, state: &mut SymbolState, ctx: &MarketContext) -> 
     let c1 = state.m15.front()?;
     let c3 = state.m15.back()?;
     let fvg = find_fvg(c1, c3, setup.direction)?;
+    f.fvg_found += 1;
 
     let entry_price = fvg_entry_price(&fvg, setup.direction, p.fvg_entry_fraction);
     let buffer = atr * p.stop_buffer_atr;
@@ -478,6 +529,7 @@ fn evaluate_m15(p: &IctParams, state: &mut SymbolState, ctx: &MarketContext) -> 
         return None;
     }
 
+    f.signals += 1;
     Some(Signal {
         symbol: ctx.symbol.clone(),
         side: setup.direction.side(),

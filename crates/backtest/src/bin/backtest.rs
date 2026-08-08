@@ -16,6 +16,7 @@ use botcore::{Instrument, Symbol, Timeframe};
 use history::HistoryDb;
 use risk::RiskParams;
 use rust_decimal::Decimal;
+use strategy::ict::{IctParams, IctStrategy};
 use strategy::pullback::{PullbackStrategy, StrategyParams};
 use strategy::reversion::{ReversionParams, ReversionStrategy};
 
@@ -128,8 +129,8 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     if holdout_only && holdout_days <= 0 {
         return Err("--holdout-only requires --holdout-days".into());
     }
-    if study != "pullback" && study != "reversion" {
-        return Err(format!("--study must be pullback or reversion, got {study:?}").into());
+    if study != "pullback" && study != "reversion" && study != "ict" {
+        return Err(format!("--study must be pullback, reversion or ict, got {study:?}").into());
     }
     Ok(Args {
         db_path,
@@ -268,21 +269,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let risk_params = RiskParams::defaults();
     let stop_offset = Decimal::new(3, 1);
     let reversion = args.study == "reversion";
+    let ict = args.study == "ict";
 
     // Six declared variants means six chances to find noise, so the study
     // raises its own benchmark bar and estimates it from more runs.
-    let thresholds = if reversion {
+    // Both pre-registered studies select one variant from six, so both raise
+    // the benchmark bar by the same Bonferroni argument.
+    let thresholds = if reversion || ict {
         GateThresholds::mean_reversion_study()
     } else {
         GateThresholds::pre_registered()
     };
-    let seed_count: u64 = if reversion { 500 } else { 100 };
+    let seed_count: u64 = if reversion || ict { 500 } else { 100 };
 
     println!("\nrunning walk-forward over {} folds...", available.len());
     // The reversion study sweeps its six declared variants and reports each,
     // so a selection is made on evidence rather than on one number. Stage 2
     // passes --variant to send exactly ONE of them to the holdout.
-    let (wf_result, chosen_label, grid_size) = if reversion {
+    let (wf_result, chosen_label, grid_size) = if ict {
+        let mut declared = IctParams::declared_variants();
+        if let Some(want) = &args.variant {
+            declared.retain(|(name, _)| name.eq_ignore_ascii_case(want));
+            if declared.is_empty() {
+                return Err(format!("unknown variant {:?}", args.variant).into());
+            }
+        }
+        println!("study        : ICT structural (pre-registered)");
+        println!("variants     : {}", declared.len());
+
+        let n = declared.len();
+        let mut best: Option<(String, backtest::walk_forward::WalkForwardResult<IctParams>)> = None;
+        for (name, p) in &declared {
+            let r = run_walk_forward(
+                &db,
+                &cfg,
+                &wf,
+                std::slice::from_ref(p),
+                &risk_params,
+                stop_offset,
+                &|q| Box::new(IctStrategy::new(q.clone())),
+            )
+            .await?;
+            println!(
+                "  variant {name}: trades {:>5}  expectancy {:>12}  PF {:>8}  worstFoldDD {:>7}%",
+                r.oos_metrics.trade_count,
+                r.oos_metrics.expectancy.round_dp(4),
+                r.oos_metrics
+                    .profit_factor
+                    .map(|v| v.round_dp(3).to_string())
+                    .unwrap_or_else(|| "undef".into()),
+                r.oos_metrics.max_drawdown_pct.round_dp(2)
+            );
+            let eligible = r.oos_metrics.trade_count >= thresholds.min_trades;
+            let better = match &best {
+                None => eligible,
+                Some((_, b)) => eligible && r.oos_metrics.expectancy > b.oos_metrics.expectancy,
+            };
+            if better {
+                best = Some((name.to_string(), r));
+            }
+        }
+        match best {
+            Some((name, r)) => {
+                println!("\nselected variant: {name}");
+                (summarise_folds(&r), name, n)
+            }
+            None => {
+                println!("\n---------------- VERDICT: FAIL ----------------");
+                println!(
+                    "Reason: NO VARIANT reached {} out-of-sample trades.",
+                    thresholds.min_trades
+                );
+                println!("The study fails at stage 1 for insufficient setup frequency.");
+                println!("The holdout is NOT opened. No definition was loosened.");
+                return Ok(());
+            }
+        }
+    } else if reversion {
         let mut declared = ReversionParams::declared_variants();
         if let Some(want) = &args.variant {
             declared.retain(|(name, _)| name.eq_ignore_ascii_case(want));

@@ -11,4 +11,6 @@ rust_decimal.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+history = { path = "../history" }
+tokio.workspace = true
 rust_decimal_macros.workspace = true
