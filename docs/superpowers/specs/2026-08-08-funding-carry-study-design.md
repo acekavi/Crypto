@@ -11,7 +11,7 @@ each funding period. That implies:
 | Owner's rule | Carry needs |
 |---|---|
 | Max 5 entries per day | Up to 40 rebalances per period, three periods a day |
-| 1:2 risk-to-reward | No price target at all — the return is the funding collected |
+| Fixed risk-to-reward (1:3, revised from 1:2 during the ICT work) | No price target at all — the return is the funding collected |
 | Stop loss on every trade | Positions held to the next rebalance, not stopped out |
 | Max 4 concurrent positions | Breadth is the entire mechanism; 4 defeats it |
 
