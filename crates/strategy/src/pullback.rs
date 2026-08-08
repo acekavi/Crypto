@@ -149,7 +149,7 @@ impl Strategy for PullbackStrategy {
             // only H1 and H4 — so nothing should route here. Named explicitly
             // rather than caught by `_` so that adding a timeframe forces this
             // decision again instead of silently defaulting to "ignore".
-            Timeframe::M15 | Timeframe::D1 => None,
+            Timeframe::M5 | Timeframe::M15 | Timeframe::D1 => None,
         }
     }
 }

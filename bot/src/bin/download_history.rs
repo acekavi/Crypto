@@ -17,7 +17,13 @@ const DAY_MS: i64 = 86_400_000;
 /// Both timeframes the live strategy consumes (see `bot/src/main.rs`'s
 /// `strategy_timeframes`) — a backtest needs the same history the live bot
 /// warms up on.
-const TIMEFRAMES: [Timeframe; 4] = [Timeframe::M15, Timeframe::H1, Timeframe::H4, Timeframe::D1];
+const TIMEFRAMES: [Timeframe; 5] = [
+    Timeframe::M5,
+    Timeframe::M15,
+    Timeframe::H1,
+    Timeframe::H4,
+    Timeframe::D1,
+];
 
 struct Args {
     symbols: Vec<Symbol>,

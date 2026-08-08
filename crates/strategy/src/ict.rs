@@ -64,6 +64,22 @@ pub struct IctParams {
     /// EXPLORATORY. The pre-registered study fixes this true; running it false
     /// makes the result a diagnostic, not that study's outcome.
     pub session_filter: bool,
+    /// Where liquidity sweeps and structure are tracked.
+    ///
+    /// H4 sweeps are rarer but each takes out a more significant level. The
+    /// tradeoff is that the sweep candle's range — which defines the stop when
+    /// `stop_buffer_atr` is zero — is four times wider, so risk per trade is
+    /// set by a 4h range while the entry is placed with 5m precision.
+    pub structure_tf: Timeframe,
+    /// Where fair value gaps are found and entries placed.
+    pub execution_tf: Timeframe,
+    /// Whether a market structure shift must confirm the sweep.
+    ///
+    /// Measured as the dominant bottleneck: only 3.2% of sweeps produced a
+    /// confirmed shift within the window, which is what starved the registered
+    /// study of trades. Turning it off is the single change that materially
+    /// raises setup frequency.
+    pub require_mss: bool,
     /// Target as a multiple of risk.
     ///
     /// EXPLORATORY above 2. The owner's standing rule is 1:2, and the
@@ -86,8 +102,35 @@ impl IctParams {
             atr_period: 14,
             ny_open_ms: 13 * 3_600_000 + 30 * 60_000, // 13:30 UTC
             ny_close_ms: 20 * 3_600_000,              // 20:00 UTC
+            structure_tf: Timeframe::H1,
+            execution_tf: Timeframe::M15,
+            require_mss: true,
             session_filter: true,
             reward_multiple: Decimal::TWO,
+        }
+    }
+
+    /// The requested exploratory configuration: sweep liquidity on 4h, enter
+    /// the fair value gap on 5m, stop at the sweep candle's own extreme, and
+    /// target 3R.
+    ///
+    /// EXPLORATORY, not the pre-registered study. It changes five things at
+    /// once — structure timeframe, execution timeframe, the MSS requirement,
+    /// the stop rule and the reward multiple — so a result cannot be
+    /// attributed to any one of them. Its purpose is to find out whether the
+    /// setup produces a measurable number of trades at all.
+    pub fn h4_sweep_m5_entry() -> Self {
+        IctParams {
+            structure_tf: Timeframe::H4,
+            execution_tf: Timeframe::M5,
+            // The dominant bottleneck: only 3.2% of sweeps ever confirmed one.
+            require_mss: false,
+            // Zero buffer puts the stop AT the sweep candle's low (long) or
+            // high (short) — the level price rejected.
+            stop_buffer_atr: Decimal::ZERO,
+            reward_multiple: Decimal::from(3),
+            session_filter: false,
+            ..Self::variant_a()
         }
     }
 
@@ -338,7 +381,7 @@ impl IctStrategy {
 
     pub fn new(params: IctParams) -> Self {
         IctStrategy {
-            params,
+            params: params.clone(),
             funnel: Funnel::default(),
             per_symbol: HashMap::new(),
             timeframes: vec![Timeframe::M15, Timeframe::H1, Timeframe::H4, Timeframe::D1],
@@ -374,23 +417,25 @@ impl Strategy for IctStrategy {
             .or_insert_with(|| SymbolState::new(&p));
         let candle = ctx.candle;
 
-        match ctx.timeframe {
-            Timeframe::D1 => {
-                let e = state.ema_d1.update(candle.close);
-                state.bias_d1 = bias_from(candle.close, e);
-                None
-            }
-            Timeframe::H4 => {
-                let e = state.ema_h4.update(candle.close);
-                state.bias_h4 = bias_from(candle.close, e);
-                None
-            }
-            Timeframe::H1 => {
-                track_structure(&p, state, candle, &mut self.funnel);
-                None
-            }
-            Timeframe::M15 => evaluate_m15(&p, state, ctx, &mut self.funnel),
+        // Dispatch on the CONFIGURED roles rather than fixed timeframes, so a
+        // variant can sweep on 4h and execute on 5m. H4 always advances the
+        // bias even when it is also the structure timeframe — one candle can
+        // legitimately serve both.
+        if ctx.timeframe == Timeframe::D1 {
+            let e = state.ema_d1.update(candle.close);
+            state.bias_d1 = bias_from(candle.close, e);
         }
+        if ctx.timeframe == Timeframe::H4 {
+            let e = state.ema_h4.update(candle.close);
+            state.bias_h4 = bias_from(candle.close, e);
+        }
+        if ctx.timeframe == p.structure_tf {
+            track_structure(&p, state, candle, &mut self.funnel);
+        }
+        if ctx.timeframe == p.execution_tf {
+            return evaluate_m15(&p, state, ctx, &mut self.funnel);
+        }
+        None
     }
 }
 

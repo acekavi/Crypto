@@ -373,6 +373,7 @@ impl HistoryDb {
             // Stored as Bybit's own interval string, so map it back rather
             // than inventing a second encoding that could drift from it.
             let tf = match tf_text.as_str() {
+                "5" => Timeframe::M5,
                 "15" => Timeframe::M15,
                 "60" => Timeframe::H1,
                 "240" => Timeframe::H4,
