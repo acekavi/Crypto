@@ -354,9 +354,16 @@ impl ExchangeClient for SimulatedExchange {
         Ok(())
     }
 
+    /// Ordered by symbol.
+    ///
+    /// Built from a `HashMap`, whose iteration order is random per process. A
+    /// simulator that returns an arbitrary order is the same latent defect as
+    /// the resting-order pick that made this backtester non-reproducible — a
+    /// caller that ever becomes order-sensitive would inherit it silently, and
+    /// the sort costs nothing at these sizes.
     async fn positions(&self) -> Result<Vec<Position>, ExchangeError> {
         let state = self.state.lock().expect("sim exchange lock");
-        Ok(state
+        let mut out: Vec<Position> = state
             .positions
             .iter()
             .map(|(symbol, pos)| Position {
@@ -374,12 +381,15 @@ impl ExchangeClient for SimulatedExchange {
                 // settle time instead.
                 unrealized_pnl: Decimal::ZERO,
             })
-            .collect())
+            .collect();
+        out.sort_by(|a, b| a.symbol.as_str().cmp(b.symbol.as_str()));
+        Ok(out)
     }
 
+    /// Ordered by `order_link_id`, for the same reason as `positions`.
     async fn open_orders(&self) -> Result<Vec<OpenOrder>, ExchangeError> {
         let state = self.state.lock().expect("sim exchange lock");
-        Ok(state
+        let mut out: Vec<OpenOrder> = state
             .resting
             .values()
             .map(|entry| OpenOrder {
@@ -398,7 +408,9 @@ impl ExchangeClient for SimulatedExchange {
                 created_time_ms: 0,
                 updated_time_ms: 0,
             })
-            .collect())
+            .collect();
+        out.sort_by(|a, b| a.order_link_id.cmp(&b.order_link_id));
+        Ok(out)
     }
 
     async fn set_leverage(
