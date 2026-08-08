@@ -85,6 +85,13 @@ pub struct ListResult<T> {
     // responses must still deserialize so the envelope's retCode/time survive.
     #[serde(default)]
     pub list: Vec<T>,
+    /// Opaque cursor for the next page, absent or empty on the last one.
+    ///
+    /// Endpoints that page (instruments-info caps at 500 rows) silently return
+    /// a truncated list without it. `/v5/market/tickers` does not page and
+    /// always omits it.
+    #[serde(rename = "nextPageCursor", default)]
+    pub next_page_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,6 +375,30 @@ impl WalletRow {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn a_list_result_carries_bybits_page_cursor() {
+        // instruments-info caps a page at 500 rows and signals more with this
+        // cursor. Dropping it silently truncated the instrument list to the
+        // alphabetically-first 500, which hid SOLUSDT and XRPUSDT from an
+        // 788-instrument testnet.
+        let r: ListResult<serde_json::Value> = serde_json::from_str(
+            r#"{"list":[],"nextPageCursor":"first%3D0GUSDT%26last%3DPAXGPERP"}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            r.next_page_cursor.as_deref(),
+            Some("first%3D0GUSDT%26last%3DPAXGPERP")
+        );
+    }
+
+    #[test]
+    fn a_list_result_without_a_cursor_is_the_last_page() {
+        // /v5/market/tickers never pages and omits the field entirely.
+        let r: ListResult<serde_json::Value> =
+            serde_json::from_str(r#"{"list":[]}"#).expect("parses");
+        assert_eq!(r.next_page_cursor, None);
+    }
 
     #[test]
     fn kline_rows_parse_from_bybit_string_arrays() {

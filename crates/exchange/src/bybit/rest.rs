@@ -392,20 +392,39 @@ where
 #[async_trait]
 impl ExchangeClient for BybitRest {
     /// All linear perpetual instruments currently in `Trading` status.
+    /// Every tradable linear instrument, following Bybit's page cursor.
+    ///
+    /// This endpoint caps a page at 500 rows and signals more with
+    /// `nextPageCursor`. A single un-paged call silently returns the
+    /// alphabetically-first 500 — which both hid symbols from the universe
+    /// screen and made pinned symbols look unlisted.
     async fn instruments(&self) -> Result<Vec<Instrument>, ExchangeError> {
-        let res: ListResult<InstrumentRow> = self
-            .get(
-                "/v5/market/instruments-info",
-                &[("category", "linear".into())],
-            )
-            .await?;
-        let mut out = Vec::with_capacity(res.list.len());
-        for row in res.list {
-            if let Some(i) = row.into_instrument()? {
-                out.push(i);
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut params = vec![("category", "linear".to_string()), ("limit", "1000".into())];
+            if let Some(c) = &cursor {
+                params.push(("cursor", c.clone()));
+            }
+            let res: ListResult<InstrumentRow> =
+                self.get("/v5/market/instruments-info", &params).await?;
+            let page_len = res.list.len();
+            for row in res.list {
+                if let Some(i) = row.into_instrument()? {
+                    out.push(i);
+                }
+            }
+            // An unchanged cursor would loop forever; an empty page cannot
+            // carry a useful one. Same guard as `klines_range`.
+            match res.next_page_cursor {
+                Some(next)
+                    if !next.is_empty() && page_len > 0 && Some(&next) != cursor.as_ref() =>
+                {
+                    cursor = Some(next);
+                }
+                _ => return Ok(out),
             }
         }
-        Ok(out)
     }
 
     /// 24h statistics for every linear perpetual, used for universe ranking.
