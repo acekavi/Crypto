@@ -145,6 +145,11 @@ impl Strategy for PullbackStrategy {
                 None
             }
             Timeframe::H1 => evaluate_h1(&params, state, ctx),
+            // Never subscribed to by this strategy — `timeframes()` declares
+            // only H1 and H4 — so nothing should route here. Named explicitly
+            // rather than caught by `_` so that adding a timeframe forces this
+            // decision again instead of silently defaulting to "ignore".
+            Timeframe::M15 | Timeframe::D1 => None,
         }
     }
 }

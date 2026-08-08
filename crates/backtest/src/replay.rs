@@ -93,8 +93,10 @@ struct ReplayTick {
 /// that case.
 fn timeframe_rank(tf: Timeframe) -> u8 {
     match tf {
-        Timeframe::H1 => 0,
-        Timeframe::H4 => 1,
+        Timeframe::H1 => 1,
+        Timeframe::M15 => 0,
+        Timeframe::H4 => 2,
+        Timeframe::D1 => 3,
     }
 }
 

@@ -5,8 +5,14 @@ use serde::{Deserialize, Serialize};
 /// adding more is a deliberate act, not an accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Timeframe {
+    /// Execution timeframe. 5m was considered and rejected: it triples the
+    /// candle count and roughly triples trade frequency, and the reversion
+    /// study measured fees at 77% of that strategy's entire net loss. More
+    /// turnover is the last thing a thin edge needs.
+    M15,
     H1,
     H4,
+    D1,
 }
 
 impl Timeframe {
@@ -14,14 +20,18 @@ impl Timeframe {
     pub fn as_bybit_interval(self) -> &'static str {
         match self {
             Timeframe::H1 => "60",
+            Timeframe::M15 => "15",
             Timeframe::H4 => "240",
+            Timeframe::D1 => "D",
         }
     }
 
     pub fn duration_ms(self) -> i64 {
         match self {
             Timeframe::H1 => 3_600_000,
+            Timeframe::M15 => 900_000,
             Timeframe::H4 => 14_400_000,
+            Timeframe::D1 => 86_400_000,
         }
     }
 }
