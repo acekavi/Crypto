@@ -85,20 +85,36 @@ pub struct RiskConfig {
     pub leverage: u32,
 }
 
+/// The ICT `liquidity_sweep_v2` rule set, plus the engine settings that govern
+/// how its orders are worked.
+///
+/// The structure and execution timeframes are deliberately absent: they are
+/// fixed at H4/M15 in `strategy::ict_params_from_config`, because a config that
+/// could change them could silently run a strategy nobody has measured.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrategyConfig {
-    pub ema_fast: usize,
-    pub ema_slow: usize,
-    pub ema_entry: usize,
-    pub rsi_period: usize,
-    pub rsi_long_trigger: f64,
-    pub rsi_short_trigger: f64,
-    pub atr_period: usize,
-    pub atr_band_min_pct: f64,
-    pub atr_band_max_pct: f64,
+    pub bias_ema: usize,
     pub swing_lookback: usize,
-    pub atr_stop_multiple: f64,
+    pub atr_period: usize,
+    pub ob_lookback: usize,
+    pub fvg_entry_fraction: f64,
+    pub stop_buffer_atr: f64,
+    pub stop_widen_multiple: f64,
     pub reward_multiple: f64,
+    /// Multiple of initial risk at which the stop moves to entry. Absent means
+    /// the stop never moves — NOT the same as zero, which would move it to
+    /// entry immediately and is refused as a config value.
+    pub breakeven_at_r: Option<f64>,
+    pub use_pdh_pdl: bool,
+    pub use_session_levels: bool,
+    pub use_order_block: bool,
+    pub require_mss: bool,
+    pub session_filter: bool,
+    pub allow_long: bool,
+    pub allow_short: bool,
+
+    // Engine settings, not strategy rules: how long a resting entry lives and
+    // how its stop is worked once filled.
     pub entry_expiry_candles: u32,
     pub stop_limit_offset_atr: f64,
     pub max_stop_escalations: u32,
@@ -107,6 +123,14 @@ pub struct StrategyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UniverseConfig {
+    /// An explicit, pinned universe. When present it is used verbatim and the
+    /// turnover and listing-age screens below are skipped entirely.
+    ///
+    /// This is how the live universe is held to the exact symbols the strategy
+    /// was measured on. Screening for the top N by turnover would let the bot
+    /// take its full concurrent-position count across symbols nobody measured.
+    pub symbols: Option<Vec<String>>,
+    /// The screen, used only when `symbols` is absent.
     pub size: usize,
     pub min_turnover_24h: u64,
     pub min_listing_age_days: i64,

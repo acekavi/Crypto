@@ -15,7 +15,7 @@ use persistence::{Journal, JournalError, spawn_sync_task};
 use risk::{RiskManager, RiskParams};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
-use strategy::{PullbackStrategy, Strategy, params_from_f64_config};
+use strategy::{IctStrategy, Strategy, ict_params_from_config};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{error, info, warn};
 
@@ -137,23 +137,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    requirement drive every subsequent warm-up and subscription — they
     //    are captured here, before the strategy is boxed into the engine,
     //    because nothing downstream can reach inside the engine to ask it.
-    let strategy_params = params_from_f64_config(
-        config.strategy.ema_fast,
-        config.strategy.ema_slow,
-        config.strategy.ema_entry,
-        config.strategy.rsi_period,
-        config.strategy.rsi_long_trigger,
-        config.strategy.rsi_short_trigger,
-        config.strategy.atr_period,
-        config.strategy.atr_band_min_pct,
-        config.strategy.atr_band_max_pct,
+    let strategy_params = ict_params_from_config(
+        config.strategy.bias_ema,
         config.strategy.swing_lookback,
-        config.strategy.atr_stop_multiple,
+        config.strategy.atr_period,
+        config.strategy.ob_lookback,
+        config.strategy.fvg_entry_fraction,
+        config.strategy.stop_buffer_atr,
+        config.strategy.stop_widen_multiple,
         config.strategy.reward_multiple,
+        config.strategy.breakeven_at_r,
+        config.strategy.use_pdh_pdl,
+        config.strategy.use_session_levels,
+        config.strategy.use_order_block,
+        config.strategy.require_mss,
+        config.strategy.session_filter,
+        config.strategy.allow_long,
+        config.strategy.allow_short,
     )?;
-    let pullback = PullbackStrategy::new(strategy_params);
-    let strategy_timeframes: Vec<Timeframe> = pullback.timeframes().to_vec();
-    let warmup_candles = pullback.warmup_candles();
+    info!(
+        reward_multiple = %strategy_params.reward_multiple,
+        breakeven_at_r = ?strategy_params.breakeven_at_r,
+        structure_tf = ?strategy_params.structure_tf,
+        execution_tf = ?strategy_params.execution_tf,
+        "strategy: ICT liquidity sweep"
+    );
+    let ict = IctStrategy::new(strategy_params);
+    let strategy_timeframes: Vec<Timeframe> = ict.timeframes().to_vec();
+    let warmup_candles = ict.warmup_candles();
     let warmup_limit = warmup_candles as u16;
 
     let risk_params = RiskParams {
@@ -178,15 +189,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "strategy.stop_limit_offset_atr",
     )?;
 
-    // Entries are always timed on H1 (the pullback strategy only signals on
-    // H1 closes), so the expiry window the reconciler uses to judge a
-    // resting order's age is expressed in H1 candles regardless of which
-    // other timeframes the strategy also consumes.
+    // Entries are timed on the strategy's fastest declared timeframe — the one
+    // it emits signals on, M15 for ICT — so the expiry window the reconciler
+    // uses to judge a resting order's age is expressed in those candles.
+    // Derived from the declaration rather than naming a timeframe here: 12
+    // candles is three hours on M15 and twelve on H1, so a hard-coded
+    // timeframe leaves stale entries resting four times too long after a
+    // restart the moment the strategy changes.
+    let entry_timeframe = strategy_timeframes
+        .iter()
+        .copied()
+        .min_by_key(|tf| tf.duration_ms())
+        .expect("a strategy declares at least one timeframe");
     let expiry_window_ms =
-        Timeframe::H1.duration_ms() * i64::from(config.strategy.entry_expiry_candles);
+        entry_timeframe.duration_ms() * i64::from(config.strategy.entry_expiry_candles);
 
     let mut engine_loop = EngineLoop::new(
-        Box::new(pullback),
+        Box::new(ict),
         RiskManager::new(risk_params, stop_limit_offset_atr),
         Arc::clone(&rest) as Arc<dyn ExchangeClient>,
         Arc::clone(&journal),
@@ -224,28 +243,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warn!(%symbol, "adopted position — verify it carries a stop and target");
     }
 
-    // 6. Rank the tradable universe, always keeping symbols reconciliation
-    //    just adopted so their candles keep arriving and the engine can
-    //    manage them to a close.
-    let protected = engine_loop.protected_symbols().await?;
-    let tickers = rest.tickers().await?;
+    // 6. Establish the tradable universe. A pinned list is used verbatim; only
+    //    when none is configured is the turnover/age screen consulted, which
+    //    always keeps symbols reconciliation just adopted so their candles keep
+    //    arriving and the engine can manage them to a close.
     let universe_filter = UniverseFilter {
         size: config.universe.size,
         min_turnover_24h: Decimal::from(config.universe.min_turnover_24h),
         min_listing_age_days: config.universe.min_listing_age_days,
     };
-    let symbols = select_universe(
-        &tickers,
-        &instruments,
-        &universe_filter,
-        rest.clock().now_ms(),
-        &protected,
-    );
-    info!(
-        count = symbols.len(),
-        top = ?symbols.first().map(Symbol::as_str),
-        "universe ranked"
-    );
+    let symbols: Vec<Symbol> = match &config.universe.symbols {
+        // Pinned: the strategy's measured results describe exactly these
+        // symbols, so screening the top N by turnover instead would spend the
+        // concurrent-position budget on symbols nobody measured.
+        Some(pinned) => {
+            let known: HashSet<&str> = instruments.iter().map(|i| i.symbol.as_str()).collect();
+            // Refuse at startup rather than warn per candle: without instrument
+            // metadata no order can be formed for a symbol, so a typo here
+            // would look like a healthy bot that silently never trades it.
+            let unknown: Vec<&String> = pinned
+                .iter()
+                .filter(|s| !known.contains(s.as_str()))
+                .collect();
+            if !unknown.is_empty() {
+                error!(?unknown, "pinned symbols are not tradable instruments");
+                return Err(format!(
+                    "universe.symbols contains symbols the exchange does not list: {unknown:?}"
+                )
+                .into());
+            }
+            info!(count = pinned.len(), symbols = ?pinned, "universe pinned by config");
+            pinned.iter().map(Symbol::new).collect()
+        }
+        None => {
+            let protected = engine_loop.protected_symbols().await?;
+            let tickers = rest.tickers().await?;
+            let ranked = select_universe(
+                &tickers,
+                &instruments,
+                &universe_filter,
+                rest.clock().now_ms(),
+                &protected,
+            );
+            info!(
+                count = ranked.len(),
+                top = ?ranked.first().map(Symbol::as_str),
+                "universe ranked"
+            );
+            ranked
+        }
+    };
     if symbols.is_empty() {
         error!(
             min_turnover_24h = config.universe.min_turnover_24h,

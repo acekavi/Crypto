@@ -119,30 +119,37 @@ fn config_hash_is_stable_and_parameter_sensitive() {
     assert_eq!(a.hash().len(), 64, "hash is a SHA-256 hex digest");
 }
 
+/// A syntactically complete config, deliberately NOT the shipped one — the
+/// hash test needs a fixture it can perturb without touching what the bot
+/// trades.
 const SAMPLE: &str = r#"
 [risk]
 risk_pct = 0.01
-max_concurrent_positions = 4
+max_concurrent_positions = 8
 max_daily_entries = 5
 daily_drawdown_halt_pct = 0.05
-total_drawdown_halt_pct = 0.15
+total_drawdown_halt_pct = 0.20
 liq_buffer_multiple = 3.0
 leverage = 5
 
 [strategy]
-ema_fast = 50
-ema_slow = 200
-ema_entry = 20
-rsi_period = 14
-rsi_long_trigger = 40
-rsi_short_trigger = 60
+bias_ema = 50
+swing_lookback = 5
 atr_period = 14
-atr_band_min_pct = 0.003
-atr_band_max_pct = 0.05
-swing_lookback = 10
-atr_stop_multiple = 1.5
-reward_multiple = 2.0
-entry_expiry_candles = 3
+ob_lookback = 5
+fvg_entry_fraction = 0.5
+stop_buffer_atr = 0.0
+stop_widen_multiple = 1.0
+reward_multiple = 5.0
+breakeven_at_r = 2.0
+use_pdh_pdl = true
+use_session_levels = false
+use_order_block = true
+require_mss = false
+session_filter = false
+allow_long = true
+allow_short = true
+entry_expiry_candles = 12
 stop_limit_offset_atr = 0.3
 max_stop_escalations = 3
 stop_fill_timeout_secs = 30

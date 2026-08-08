@@ -1,34 +1,67 @@
 [risk]
 risk_pct = 0.01
-max_concurrent_positions = 4
+# One position per symbol across the pinned 8-symbol universe. Measured: the
+# cap saturates at 6 and lifting it past 8 changes nothing.
+max_concurrent_positions = 8
+# Owner's standing rule, 3-5 trades/day. Measured non-binding: results are
+# identical at 5, 8 and 100, so the rule costs nothing.
 max_daily_entries = 5
 daily_drawdown_halt_pct = 0.05
-total_drawdown_halt_pct = 0.15
+# Raised from 0.15 on the owner's instruction. The strategy's measured
+# research-window drawdown is 17.1%, so a 15% halt would stop the bot on a
+# path the backtest treats as normal.
+total_drawdown_halt_pct = 0.20
 liq_buffer_multiple = 3.0
 leverage = 5
 
+# ICT liquidity_sweep_v2, identical to testnet.toml — the risk envelope and the
+# strategy rules must never diverge between profiles, and a test asserts it.
+#
+# NOT VALIDATED OUT OF SAMPLE. Nothing here authorises a mainnet run: that
+# still needs the `mainnet` argument AND BYBIT_ALLOW_MAINNET, and this
+# configuration has only testnet paper trading behind it.
 [strategy]
-ema_fast = 50
-ema_slow = 200
-ema_entry = 20
-rsi_period = 14
-rsi_long_trigger = 40
-rsi_short_trigger = 60
+bias_ema = 50
+swing_lookback = 5
 atr_period = 14
-atr_band_min_pct = 0.003
-atr_band_max_pct = 0.05
-swing_lookback = 10
-atr_stop_multiple = 1.5
-reward_multiple = 2.0
-entry_expiry_candles = 3
+ob_lookback = 5
+fvg_entry_fraction = 0.5
+stop_buffer_atr = 0.0
+stop_widen_multiple = 1.0
+reward_multiple = 5.0
+breakeven_at_r = 2.0
+use_pdh_pdl = true
+use_session_levels = false
+use_order_block = true
+require_mss = false
+session_filter = false
+allow_long = true
+allow_short = true
+
+# Counted in the strategy's execution candles (M15), so 12 is three hours.
+entry_expiry_candles = 12
 stop_limit_offset_atr = 0.3
 max_stop_escalations = 3
 stop_fill_timeout_secs = 30
 
 [universe]
+# Pinned, not screened. These are the 8 symbols the strategy was measured on;
+# trading anything else would be running an unmeasured strategy. While this
+# list is present the screen below is not consulted at all.
+symbols = [
+  "ADAUSDT",
+  "BNBUSDT",
+  "BTCUSDT",
+  "DOGEUSDT",
+  "ETHUSDT",
+  "LINKUSDT",
+  "SOLUSDT",
+  "XRPUSDT",
+]
 size = 20
 # Mainnet-appropriate floor, unlike testnet.toml's 1000000: real Bybit
 # mainnet 24h turnover runs orders of magnitude above testnet, so this floor
-# is what actually keeps illiquid symbols out of the tradable universe.
+# is what actually keeps illiquid symbols out of the tradable universe if the
+# pinned list above is ever removed.
 min_turnover_24h = 50000000
 min_listing_age_days = 30
