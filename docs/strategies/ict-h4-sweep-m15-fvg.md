@@ -1,7 +1,23 @@
 # ICT H4 Sweep → M15 FVG
 
-**Status:** research candidate. Measured on the research window only; **never validated on held-out
-data**. Not approved for testnet or live trading.
+**Status: REJECTED.** Validated once on the 330-day holdout and failed. Not approved for testnet or
+live trading, and not to be re-tested — the holdout is spent.
+
+| | Research (selection) | Holdout (unseen) |
+|---|---|---|
+| trades | 216 | 111 |
+| win rate | 35.65% | **27.03%** |
+| expectancy | +41.52 | **+3.98** |
+| profit factor | 1.598 | **1.054** |
+| max drawdown | 14.55% | 12.96% |
+| beats random p99.17 | yes | **no — below even p95** |
+
+The research walk-forward passed all five criteria. On data that never influenced a single decision,
+profit factor collapsed to 1.054 and the strategy failed to clear even the 95th percentile of random
+entries using identical sizing and exits. Expectancy stayed positive (+3.98) but half the profit went
+to fees, and the win rate's 95% interval [18.8% .. 35.3%] straddles the 25% breakeven.
+
+The research result was in-sample luck. The holdout detected it, which is what it exists for.
 
 **Implementation:** `crates/strategy/src/ict.rs` (`IctStrategy`, `IctParams`)
 
