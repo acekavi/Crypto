@@ -134,6 +134,26 @@ async fn diag_improvement_steps() {
     )
     .await;
 
+    println!("\nDIAG === STEP 3: order block fallback (H4 sweep, expiry 12, +PDH/PDL) ===");
+    let best = IctParams {
+        use_pdh_pdl: true,
+        ..h4m15.clone()
+    };
+    measure(&db, &cfg12, best.clone(), "FVG only (current best)").await;
+    for lb in [5usize, 10, 20] {
+        measure(
+            &db,
+            &cfg12,
+            IctParams {
+                use_order_block: true,
+                ob_lookback: lb,
+                ..best.clone()
+            },
+            &format!("+ order block, lookback {lb}"),
+        )
+        .await;
+    }
+
     println!("\nDIAG === STEP 4: sweep on H1 instead of H4 (expiry held at 12) ===");
     measure(&db, &cfg12, h4m15.clone(), "H4 sweep, expiry 12").await;
     measure(

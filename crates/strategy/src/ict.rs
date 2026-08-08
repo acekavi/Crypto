@@ -84,6 +84,15 @@ pub struct IctParams {
     /// Sessions are the fixed UTC windows in `SESSIONS`. Same reasoning as
     /// PDH/PDL: resting orders build at each session's extremes.
     pub use_session_levels: bool,
+    /// Fall back to an order block when the sweep leaves no fair value gap.
+    ///
+    /// The literature treats FVG as ONE of several arrays a sweep can leave
+    /// behind — order block, breaker and FVG are alternatives, not a single
+    /// required pattern. Requiring an FVG discards setups that left a
+    /// different footprint.
+    pub use_order_block: bool,
+    /// Execution candles searched backwards for an order block.
+    pub ob_lookback: usize,
     /// Whether a market structure shift must confirm the sweep.
     ///
     /// Measured as the dominant bottleneck: only 3.2% of sweeps produced a
@@ -118,6 +127,8 @@ impl IctParams {
             require_mss: true,
             use_pdh_pdl: false,
             use_session_levels: false,
+            use_order_block: false,
+            ob_lookback: 10,
             session_filter: true,
             reward_multiple: Decimal::TWO,
         }
@@ -294,6 +305,33 @@ pub fn find_fvg(c1: &Candle, c3: &Candle, direction: Direction) -> Option<Fvg> {
             high: c1.low,
         }),
         _ => None,
+    }
+}
+
+/// The last opposing candle before the move away from a sweep.
+///
+/// A bullish setup looks for the most recent DOWN candle: the last place
+/// sellers were in control before price turned up. The zone is its BODY —
+/// open to close — rather than its full range, because the wick is where
+/// price already rejected and the body is where the unfilled interest sits.
+///
+/// Returned as a price range so the same entry-depth arithmetic works for
+/// gaps and order blocks alike.
+pub fn find_order_block(recent: &[Candle], direction: Direction) -> Option<Fvg> {
+    let c = recent.iter().rev().find(|c| match direction {
+        Direction::Bullish => c.close < c.open,
+        Direction::Bearish => c.close > c.open,
+    })?;
+    let (lo, hi) = if c.close < c.open {
+        (c.close, c.open)
+    } else {
+        (c.open, c.close)
+    };
+    // A doji has no body and therefore no zone to enter.
+    if hi <= lo {
+        None
+    } else {
+        Some(Fvg { low: lo, high: hi })
     }
 }
 
@@ -643,7 +681,14 @@ fn evaluate_m15(
     let atr = state.atr_m15.update(candle);
 
     state.m15.push_back(candle.clone());
-    while state.m15.len() > 3 {
+    // Three candles is all a gap needs; an order block search looks further
+    // back, so the window is the larger of the two.
+    let window = if p.use_order_block {
+        p.ob_lookback.max(3)
+    } else {
+        3
+    };
+    while state.m15.len() > window {
         state.m15.pop_front();
     }
 
@@ -684,9 +729,21 @@ fn evaluate_m15(
     if state.m15.len() < 3 {
         return None;
     }
-    let c1 = state.m15.front()?;
-    let c3 = state.m15.back()?;
-    let fvg = find_fvg(c1, c3, setup.direction)?;
+    // The gap is read from the LAST THREE candles specifically, so a widened
+    // order-block window does not change what counts as a fair value gap.
+    let n = state.m15.len();
+    let c1 = state.m15.get(n - 3)?;
+    let c3 = state.m15.get(n - 1)?;
+    let zone = match find_fvg(c1, c3, setup.direction) {
+        Some(g) => Some(g),
+        // No gap: fall back to the last opposing candle's body, if allowed.
+        None if p.use_order_block => {
+            let recent: Vec<Candle> = state.m15.iter().cloned().collect();
+            find_order_block(&recent, setup.direction)
+        }
+        None => None,
+    };
+    let fvg = zone?;
     f.fvg_found += 1;
 
     let entry_price = fvg_entry_price(&fvg, setup.direction, p.fvg_entry_fraction);

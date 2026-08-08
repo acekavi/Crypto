@@ -307,3 +307,97 @@ fn sessions_are_fixed_utc_windows_and_the_first_match_wins() {
     let day = 1_700_000_000_000i64 / 86_400_000 * 86_400_000;
     assert_eq!(session_for(day + at(2)), Some("asia"));
 }
+
+#[test]
+fn an_order_block_is_the_last_opposing_candles_body() {
+    use strategy::ict::find_order_block;
+    // Bullish setup: the last DOWN candle before price turned up. Body only —
+    // the wick is where price already rejected; the body is where the
+    // unfilled interest sits.
+    let down = Candle {
+        open_time_ms: 0,
+        open: dec!(104),
+        high: dec!(105),
+        low: dec!(98),
+        close: dec!(100),
+        volume: dec!(1),
+        turnover: dec!(1),
+    };
+    let later_up = Candle {
+        open_time_ms: 1,
+        open: dec!(100),
+        high: dec!(110),
+        low: dec!(100),
+        close: dec!(109),
+        volume: dec!(1),
+        turnover: dec!(1),
+    };
+    let seq = vec![down.clone(), later_up];
+    assert_eq!(
+        find_order_block(&seq, Direction::Bullish),
+        Some(Fvg {
+            low: dec!(100),
+            high: dec!(104)
+        }),
+        "body of the down candle, not its 98..105 range"
+    );
+}
+
+#[test]
+fn the_most_recent_opposing_candle_wins() {
+    use strategy::ict::find_order_block;
+    let mk = |o: i64, c: i64| Candle {
+        open_time_ms: 0,
+        open: Decimal::from(o),
+        high: Decimal::from(o.max(c) + 2),
+        low: Decimal::from(o.min(c) - 2),
+        close: Decimal::from(c),
+        volume: dec!(1),
+        turnover: dec!(1),
+    };
+    // Two down candles; the LATER one is the order block.
+    let seq = vec![mk(120, 110), mk(108, 100), mk(100, 115)];
+    assert_eq!(
+        find_order_block(&seq, Direction::Bullish),
+        Some(Fvg {
+            low: dec!(100),
+            high: dec!(108)
+        })
+    );
+}
+
+#[test]
+fn a_doji_has_no_body_and_so_no_order_block() {
+    use strategy::ict::find_order_block;
+    let doji = Candle {
+        open_time_ms: 0,
+        open: dec!(100),
+        high: dec!(105),
+        low: dec!(95),
+        close: dec!(100),
+        volume: dec!(1),
+        turnover: dec!(1),
+    };
+    assert_eq!(find_order_block(&[doji], Direction::Bullish), None);
+}
+
+#[test]
+fn a_bearish_order_block_is_the_last_up_candle() {
+    use strategy::ict::find_order_block;
+    let up = Candle {
+        open_time_ms: 0,
+        open: dec!(100),
+        high: dec!(110),
+        low: dec!(99),
+        close: dec!(106),
+        volume: dec!(1),
+        turnover: dec!(1),
+    };
+    assert_eq!(
+        find_order_block(&[up], Direction::Bearish),
+        Some(Fvg {
+            low: dec!(100),
+            high: dec!(106)
+        })
+    );
+}
