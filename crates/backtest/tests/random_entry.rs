@@ -200,6 +200,7 @@ async fn the_benchmark_returns_one_expectancy_per_seed_in_seed_order() {
         },
         warmup_candles: 0,
         entry_expiry_candles: 3,
+        breakeven_at_r: None,
     };
 
     let seeds = vec![1u64, 2, 3];

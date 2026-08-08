@@ -604,3 +604,142 @@ fn no_candidates_means_no_fill() {
     let mut v: Vec<&LimitEntry> = Vec::new();
     assert!(backtest::best_fillable(&mut v).is_none());
 }
+
+/// A simulator that pulls the stop to entry once price travels 1R in favour.
+fn sim_with_breakeven(sym: &Symbol) -> SimulatedExchange {
+    SimulatedExchange::with_breakeven(
+        dec!(100000),
+        vec![instrument(sym)],
+        CostModel {
+            maker_fee_rate: dec!(0.0002),
+        },
+        Some(dec!(1)),
+    )
+}
+
+#[tokio::test]
+async fn reaching_one_r_pulls_the_stop_to_entry() {
+    // Entry 100, stop-limit 95, so 1R is 5 and breakeven arms at 105.
+    // A later candle that dips to 99 must now close the trade AT ENTRY
+    // rather than running on to the old stop at 95.
+    let sym = Symbol::new("BTCUSDT");
+    let sim = sim_with_breakeven(&sym);
+    sim.place_limit_entry(LimitEntry {
+        symbol: sym.clone(),
+        side: Side::Buy,
+        qty: dec!(1),
+        price: dec!(100),
+        order_link_id: "be-1".into(),
+        stop_loss: dec!(95),
+        stop_limit_price: dec!(95),
+        take_profit: dec!(120),
+    })
+    .await
+    .expect("placed");
+
+    // Fill.
+    sim.advance(&sym, &candle_at(0, dec!(101), dec!(99)), &[]);
+    assert_eq!(sim.positions().await.expect("p").len(), 1);
+
+    // Travels to 106 without touching anything: arms breakeven.
+    let closed = sim.advance(&sym, &candle_at(1, dec!(106), dec!(100.5)), &[]);
+    assert!(closed.is_empty(), "1R is not an exit, only a stop move");
+
+    // Retraces through entry. Old stop was 95; the trade must close at 100.
+    let closed = sim.advance(&sym, &candle_at(2, dec!(101), dec!(96)), &[]);
+    assert_eq!(closed.len(), 1);
+    assert_eq!(
+        closed[0].exit_price,
+        dec!(100),
+        "must exit at entry, not at the original stop"
+    );
+    assert_eq!(closed[0].gross_pnl, dec!(0), "breakeven means zero gross");
+}
+
+#[tokio::test]
+async fn breakeven_does_not_arm_before_one_r() {
+    // Travels only to 104 against a 1R of 5. The stop must stay at 95.
+    let sym = Symbol::new("BTCUSDT");
+    let sim = sim_with_breakeven(&sym);
+    sim.place_limit_entry(LimitEntry {
+        symbol: sym.clone(),
+        side: Side::Buy,
+        qty: dec!(1),
+        price: dec!(100),
+        order_link_id: "be-2".into(),
+        stop_loss: dec!(95),
+        stop_limit_price: dec!(95),
+        take_profit: dec!(120),
+    })
+    .await
+    .expect("placed");
+
+    sim.advance(&sym, &candle_at(0, dec!(101), dec!(99)), &[]);
+    sim.advance(&sym, &candle_at(1, dec!(104), dec!(100.5)), &[]);
+    let closed = sim.advance(&sym, &candle_at(2, dec!(101), dec!(94)), &[]);
+
+    assert_eq!(closed.len(), 1);
+    assert_eq!(
+        closed[0].exit_price,
+        dec!(95),
+        "stop must remain where it was placed"
+    );
+}
+
+#[tokio::test]
+async fn a_candle_that_reaches_one_r_and_the_stop_resolves_as_a_full_loss() {
+    // THE ORDERING THAT MATTERS. This candle both reaches 1R (high 106) and
+    // trades through the original stop (low 94). OHLC cannot say which came
+    // first, so the pessimistic rule stands: it is a full loss at 95, not a
+    // scratch. Applying breakeven before resolving the exit would silently
+    // turn every such loss into a free trade.
+    let sym = Symbol::new("BTCUSDT");
+    let sim = sim_with_breakeven(&sym);
+    sim.place_limit_entry(LimitEntry {
+        symbol: sym.clone(),
+        side: Side::Buy,
+        qty: dec!(1),
+        price: dec!(100),
+        order_link_id: "be-3".into(),
+        stop_loss: dec!(95),
+        stop_limit_price: dec!(95),
+        take_profit: dec!(120),
+    })
+    .await
+    .expect("placed");
+
+    sim.advance(&sym, &candle_at(0, dec!(101), dec!(99)), &[]);
+    let closed = sim.advance(&sym, &candle_at(1, dec!(106), dec!(94)), &[]);
+
+    assert_eq!(closed.len(), 1);
+    assert_eq!(
+        closed[0].exit_price,
+        dec!(95),
+        "same-candle 1R and stop must resolve as the stop"
+    );
+}
+
+#[tokio::test]
+async fn a_short_moves_to_breakeven_on_a_downward_move() {
+    let sym = Symbol::new("BTCUSDT");
+    let sim = sim_with_breakeven(&sym);
+    sim.place_limit_entry(LimitEntry {
+        symbol: sym.clone(),
+        side: Side::Sell,
+        qty: dec!(1),
+        price: dec!(100),
+        order_link_id: "be-4".into(),
+        stop_loss: dec!(105),
+        stop_limit_price: dec!(105),
+        take_profit: dec!(80),
+    })
+    .await
+    .expect("placed");
+
+    sim.advance(&sym, &candle_at(0, dec!(101), dec!(99)), &[]);
+    sim.advance(&sym, &candle_at(1, dec!(99.5), dec!(94)), &[]);
+    let closed = sim.advance(&sym, &candle_at(2, dec!(104), dec!(99)), &[]);
+
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].exit_price, dec!(100), "short exits at entry");
+}

@@ -41,6 +41,9 @@ pub struct BacktestConfig {
     pub costs: CostModel,
     pub warmup_candles: usize,
     pub entry_expiry_candles: u32,
+    /// Pull the stop to entry once price travels this many R in favour.
+    /// `None` leaves stops where the strategy placed them.
+    pub breakeven_at_r: Option<Decimal>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -140,10 +143,11 @@ pub async fn run_backtest(
     let strategy_warmup = strategy.warmup_candles();
     let finest = timeframes.iter().copied().min_by_key(|tf| tf.duration_ms());
 
-    let sim = Arc::new(SimulatedExchange::new(
+    let sim = Arc::new(SimulatedExchange::with_breakeven(
         cfg.starting_equity,
         cfg.instruments.clone(),
         cfg.costs,
+        cfg.breakeven_at_r,
     ));
     let client: Arc<dyn ExchangeClient> = sim.clone();
 

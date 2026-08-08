@@ -59,6 +59,19 @@ pub struct IctParams {
     /// correcting it needs a timezone database and its own edge cases.
     pub ny_open_ms: i64,
     pub ny_close_ms: i64,
+    /// Whether the session window gates entries at all.
+    ///
+    /// EXPLORATORY. The pre-registered study fixes this true; running it false
+    /// makes the result a diagnostic, not that study's outcome.
+    pub session_filter: bool,
+    /// Target as a multiple of risk.
+    ///
+    /// EXPLORATORY above 2. The owner's standing rule is 1:2, and the
+    /// pre-registered study fixes it there. A higher multiple lowers the
+    /// breakeven win rate (1:3 needs 25% rather than 33.3%) but the target is
+    /// further away, so fewer trades reach it — the two effects pull against
+    /// each other and only measurement settles it.
+    pub reward_multiple: Decimal,
 }
 
 impl IctParams {
@@ -73,6 +86,8 @@ impl IctParams {
             atr_period: 14,
             ny_open_ms: 13 * 3_600_000 + 30 * 60_000, // 13:30 UTC
             ny_close_ms: 20 * 3_600_000,              // 20:00 UTC
+            session_filter: true,
+            reward_multiple: Decimal::TWO,
         }
     }
 
@@ -461,7 +476,7 @@ fn evaluate_m15(
     if atr <= Decimal::ZERO {
         return None;
     }
-    if !in_ny_session(candle.open_time_ms, p.ny_open_ms, p.ny_close_ms) {
+    if p.session_filter && !in_ny_session(candle.open_time_ms, p.ny_open_ms, p.ny_close_ms) {
         return None;
     }
     f.in_session += 1;
@@ -522,8 +537,8 @@ fn evaluate_m15(
 
     let risk = (entry_price - stop_price).abs();
     let target_price = match setup.direction {
-        Direction::Bullish => entry_price + risk * Decimal::TWO,
-        Direction::Bearish => entry_price - risk * Decimal::TWO,
+        Direction::Bullish => entry_price + risk * p.reward_multiple,
+        Direction::Bearish => entry_price - risk * p.reward_multiple,
     };
     if target_price <= Decimal::ZERO {
         return None;

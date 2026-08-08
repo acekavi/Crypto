@@ -91,6 +91,11 @@ struct OpenPosition {
     /// candles are contiguous those spans tile the hold exactly — every
     /// funding timestamp falls in one of them, and none falls in two.
     last_funded_ms: i64,
+    /// Original risk per unit, entry to stop-limit. Fixed at fill, so moving
+    /// the stop later cannot change what 1R meant.
+    initial_risk: Decimal,
+    /// Whether the stop has already been pulled to breakeven.
+    moved_to_breakeven: bool,
 }
 
 #[derive(Debug, Default)]
@@ -114,14 +119,31 @@ struct State {
 pub struct SimulatedExchange {
     instruments: Vec<Instrument>,
     costs: CostModel,
+    /// Pull the stop to entry once price has travelled this many R in favour.
+    ///
+    /// `None` leaves the stop where it was placed. The tradeoff is real and
+    /// measured rather than assumed: it removes the loss on trades that go
+    /// your way and then reverse, but converts what would have been winners
+    /// into scratches whenever price retraces to entry before continuing.
+    breakeven_at_r: Option<Decimal>,
     state: Mutex<State>,
 }
 
 impl SimulatedExchange {
     pub fn new(starting_equity: Decimal, instruments: Vec<Instrument>, costs: CostModel) -> Self {
+        Self::with_breakeven(starting_equity, instruments, costs, None)
+    }
+
+    pub fn with_breakeven(
+        starting_equity: Decimal,
+        instruments: Vec<Instrument>,
+        costs: CostModel,
+        breakeven_at_r: Option<Decimal>,
+    ) -> Self {
         SimulatedExchange {
             instruments,
             costs,
+            breakeven_at_r,
             state: Mutex::new(State {
                 equity: starting_equity,
                 resting: HashMap::new(),
@@ -183,6 +205,12 @@ impl SimulatedExchange {
             pos.last_funded_ms = candle.open_time_ms;
         }
 
+        // Breakeven is applied only AFTER the exit is resolved for this
+        // candle, never before. A candle that reaches 1R may also have traded
+        // through the original stop, and OHLC cannot say which came first —
+        // moving the stop up first would quietly convert a real loss into a
+        // scratch, which is the same optimism the pessimistic exit rule
+        // exists to refuse.
         if let Some(pos) = state.positions.get(symbol).cloned() {
             let outcome = resolve_exit(pos.side, pos.stop_limit_price, pos.take_profit, candle);
             let exit = match outcome {
@@ -233,6 +261,26 @@ impl SimulatedExchange {
             }
         }
 
+        // Still open after this candle: consider pulling the stop to entry.
+        if let Some(threshold) = self.breakeven_at_r
+            && let Some(pos) = state.positions.get_mut(symbol)
+            && !pos.moved_to_breakeven
+            && pos.initial_risk > Decimal::ZERO
+        {
+            let travelled = match pos.side {
+                Side::Buy => candle.high - pos.entry_price,
+                Side::Sell => pos.entry_price - candle.low,
+            };
+            if travelled >= pos.initial_risk * threshold {
+                // Entry exactly, not entry-plus-a-tick: the point is to stop
+                // losing on this trade, and claiming a profit that the fill
+                // would not actually capture is how a backtest flatters
+                // itself.
+                pos.stop_limit_price = pos.entry_price;
+                pos.moved_to_breakeven = true;
+            }
+        }
+
         // Only fill a resting entry for this symbol if no position is open
         // for it: one-way mode has room for exactly one net position per
         // symbol (see the `positions` field comment above), and averaging a
@@ -277,6 +325,8 @@ impl SimulatedExchange {
                         entry_ms: candle.open_time_ms,
                         stop_limit_price: entry.stop_limit_price,
                         take_profit: entry.take_profit,
+                        initial_risk: (entry.price - entry.stop_limit_price).abs(),
+                        moved_to_breakeven: false,
                         accrued_funding: Decimal::ZERO,
                         // Seeded at the entry candle's open so a funding
                         // timestamp at or before entry is never charged to a

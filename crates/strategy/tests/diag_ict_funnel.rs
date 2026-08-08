@@ -11,6 +11,10 @@ const HOLDOUT_DAYS: i64 = 330;
 const DAY: i64 = 86_400_000;
 
 #[tokio::test]
+// Diagnostic, not a guarantee: it replays the whole research window and takes
+// minutes in a debug build. Run explicitly with
+//   cargo test --release -p <crate> --test <name> -- --ignored --nocapture
+#[ignore = "slow diagnostic; run explicitly"]
 async fn diag_ict_funnel() {
     // Skips rather than fails when the history database is absent, so a fresh
     // checkout is not broken by a diagnostic that needs downloaded data.

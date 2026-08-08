@@ -143,6 +143,7 @@ fn base_cfg(sym: &Symbol, start_ms: i64, end_ms: i64) -> BacktestConfig {
         },
         warmup_candles: 0,
         entry_expiry_candles: 3,
+        breakeven_at_r: None,
     }
 }
 
