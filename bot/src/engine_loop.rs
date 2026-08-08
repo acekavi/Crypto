@@ -21,13 +21,40 @@ use tracing::{error, info, warn};
 /// `Position`, as reported by the exchange, does not carry the stop it was
 /// opened with — only size, entry price and liquidation price. This is
 /// recorded locally the moment `place_entry` succeeds in `on_candle_closed`
-/// and is the only source of truth `drive_stop_escalation` has for a
-/// position's trigger, side and ATR.
+/// and is the only source of truth `drive_stop_escalation` and
+/// `drive_breakeven_stops` have for a position's trigger, side, ATR and
+/// breakeven threshold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StopProtection {
     side: Side,
+    /// The stop's trigger price. Rewritten to the entry price once
+    /// `drive_breakeven_stops` has actually moved the stop, so the escalation
+    /// ladder measures from where the stop now sits rather than from where it
+    /// was first placed.
     trigger: Decimal,
     atr: Decimal,
+    /// Price the entry was placed at. The breakeven amend's trigger is this
+    /// exactly — entry, not entry plus a tick: the point is to stop losing on
+    /// the trade, not to claim a profit the fill would not capture.
+    entry_price: Decimal,
+    /// Entry to stop-limit distance, fixed when the entry was placed. 1R means
+    /// the real worst case (see `RiskManager::evaluate`), and moving the stop
+    /// later must not change what 1R meant.
+    initial_risk: Decimal,
+    /// How far BEYOND the trigger the stop-limit sits, taken from the prices
+    /// risk already computed. A long's stop-limit is below its trigger, a
+    /// short's above; getting that backwards is the sizing bug fixed in
+    /// `2d19d2d`, so the breakeven amend reuses the same offset rather than
+    /// recomputing it.
+    stop_limit_offset: Decimal,
+    /// Pull the stop to entry once price has travelled this many R in favour.
+    /// Carried verbatim from `Signal` through `OrderIntent`; `None` leaves the
+    /// stop where it was placed. The strategy is the only thing that decides
+    /// when a stop moves.
+    breakeven_at_r: Option<Decimal>,
+    /// Whether the stop has already been pulled to entry. Set only after the
+    /// exchange has accepted the amend, so a failure retries next tick.
+    moved_to_breakeven: bool,
 }
 
 /// Why a candle produced no order.
@@ -234,6 +261,118 @@ impl EngineLoop {
         }
     }
 
+    /// One position-management pass, and the only thing the live loop's timer
+    /// arm calls.
+    ///
+    /// Breakeven runs BEFORE escalation, deliberately: a stop that has just
+    /// been pulled to entry and immediately triggered must escalate from its
+    /// new trigger, not the one it was placed at. Running escalation first
+    /// would spend a tick measuring against a trigger that no longer exists.
+    ///
+    /// This exists as a seam rather than two calls in `main.rs` so a test can
+    /// prove the tick actually drives both. Twice now this codebase has
+    /// shipped a pass that was implemented, unit-tested and never invoked —
+    /// the escalation ladder (`299bf40`) and the drawdown halt (`3a725d5`).
+    pub async fn drive_position_management(&mut self, now_ms: i64) -> Result<(), ExchangeError> {
+        self.drive_breakeven_stops().await?;
+        self.drive_stop_escalation(now_ms).await
+    }
+
+    /// Pull the stop to entry on every open position that has travelled its
+    /// strategy's breakeven multiple in favour.
+    ///
+    /// This is the live counterpart of the rule the simulator applies in
+    /// `SimulatedExchange::advance`. Without it the live bot trades the
+    /// backtested 1:5 target with no breakeven stop — measured at PF 1.312 and
+    /// 21.3% max drawdown, which breaches the 20% total-drawdown halt, so the
+    /// bot would halt itself.
+    ///
+    /// Distance travelled is measured from the ticker's last price, the same
+    /// source `drive_stop_escalation` uses, against `initial_risk` fixed at
+    /// placement. Note this samples price rather than watching a high-water
+    /// mark: the simulator tests `candle.high`, so a spike through the
+    /// threshold that fully retraces between two ticks moves the stop in a
+    /// backtest and does not move it live.
+    ///
+    /// The amend is a plain amend of the resting stop-limit — never a market
+    /// order — and one symbol failing must not stop the rest being evaluated,
+    /// so nothing in the per-position loop uses `?`.
+    pub async fn drive_breakeven_stops(&mut self) -> Result<(), ExchangeError> {
+        let positions = self.client.positions().await?;
+        let tickers = self.client.tickers().await?;
+        let last_price: HashMap<&str, Decimal> = tickers
+            .iter()
+            .map(|t| (t.symbol.as_str(), t.last_price))
+            .collect();
+
+        for position in &positions {
+            let Some(protection) = self.protections.get(&position.symbol) else {
+                continue;
+            };
+            // No threshold means the strategy did not ask for a breakeven
+            // stop, and this pass has no opinion of its own.
+            let Some(threshold) = protection.breakeven_at_r else {
+                continue;
+            };
+            if protection.moved_to_breakeven || protection.initial_risk <= Decimal::ZERO {
+                continue;
+            }
+            let Some(&price) = last_price.get(position.symbol.as_str()) else {
+                continue;
+            };
+
+            let side = protection.side;
+            let entry_price = protection.entry_price;
+            let travelled = match side {
+                Side::Buy => price - entry_price,
+                Side::Sell => entry_price - price,
+            };
+            if travelled < protection.initial_risk * threshold {
+                continue;
+            }
+
+            // Beyond the trigger, on the side price is moving through it: a
+            // long's stop sells to close on the way down, so its limit sits
+            // below; a short's sits above.
+            let limit_price = match side {
+                Side::Buy => entry_price - protection.stop_limit_offset,
+                Side::Sell => entry_price + protection.stop_limit_offset,
+            };
+
+            match self
+                .client
+                .amend_stop(&position.symbol, entry_price, limit_price)
+                .await
+            {
+                Ok(()) => {
+                    // Only now. A failed amend leaves the flag clear so the
+                    // next tick retries rather than silently skipping.
+                    if let Some(entry) = self.protections.get_mut(&position.symbol) {
+                        entry.moved_to_breakeven = true;
+                        // The stop now rests at entry, so the escalation
+                        // ladder must measure from there.
+                        entry.trigger = entry_price;
+                    }
+                    info!(
+                        symbol = %position.symbol,
+                        trigger = %entry_price,
+                        %limit_price,
+                        "stop moved to entry; the trade can no longer lose"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        symbol = %position.symbol,
+                        error = %e,
+                        "moving the stop to entry failed; retrying next tick"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Advance the stop-escalation ladder for every open position that
     /// carries a recorded protection.
     ///
@@ -374,9 +513,63 @@ impl EngineLoop {
     /// ladder — which only cares that a protection record exists — would be
     /// disproportionate to what these tests check; see
     /// `account_state_for_test`, below, for the same rationale.
+    ///
+    /// Records no breakeven threshold, so a protection seeded this way is
+    /// invisible to `drive_breakeven_stops` — see
+    /// `protect_with_breakeven_for_test` for that.
     pub fn protect_for_test(&mut self, symbol: Symbol, side: Side, trigger: Decimal, atr: Decimal) {
-        self.protections
-            .insert(symbol, StopProtection { side, trigger, atr });
+        self.protections.insert(
+            symbol,
+            StopProtection {
+                side,
+                trigger,
+                atr,
+                entry_price: Decimal::ZERO,
+                initial_risk: Decimal::ZERO,
+                stop_limit_offset: Decimal::ZERO,
+                breakeven_at_r: None,
+                moved_to_breakeven: false,
+            },
+        );
+    }
+
+    /// Test-only: seed a protection record carrying the breakeven bookkeeping
+    /// too, exactly as `on_candle_closed` derives it from a placed
+    /// `OrderIntent`. Same rationale as `protect_for_test`: driving a full
+    /// engineered signal through a strategy and the risk layer purely to
+    /// reach an open position would be disproportionate to what the breakeven
+    /// pass actually reads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn protect_with_breakeven_for_test(
+        &mut self,
+        symbol: Symbol,
+        side: Side,
+        entry_price: Decimal,
+        trigger: Decimal,
+        stop_limit_price: Decimal,
+        atr: Decimal,
+        breakeven_at_r: Option<Decimal>,
+    ) {
+        self.protections.insert(
+            symbol,
+            StopProtection {
+                side,
+                trigger,
+                atr,
+                entry_price,
+                initial_risk: (entry_price - stop_limit_price).abs(),
+                stop_limit_offset: (trigger - stop_limit_price).abs(),
+                breakeven_at_r,
+                moved_to_breakeven: false,
+            },
+        );
+    }
+
+    /// Test-only: the trigger currently recorded for a symbol. Proves a
+    /// successful breakeven amend rewrites it, so the escalation ladder
+    /// measures from where the stop now rests.
+    pub fn recorded_trigger_for_test(&self, symbol: &Symbol) -> Option<Decimal> {
+        self.protections.get(symbol).map(|p| p.trigger)
     }
 
     /// Test-only: how many protection records are currently held. Proves
@@ -577,12 +770,23 @@ impl EngineLoop {
                 // means this only runs once the exchange has accepted the
                 // order, and `Position` itself never carries the stop back,
                 // so this is the only place it can be captured.
+                //
+                // `breakeven_at_r` rides along here because it is the only
+                // record of the strategy's threshold that survives to the
+                // open position: Bybit has no order type for "move the stop
+                // at 2R", so `LimitEntry` never sends it and nothing comes
+                // back from the exchange carrying it.
                 self.protections.insert(
                     intent.symbol.clone(),
                     StopProtection {
                         side: intent.side,
                         trigger: intent.stop_price,
                         atr: intent.atr,
+                        entry_price: intent.entry_price,
+                        initial_risk: (intent.entry_price - intent.stop_limit_price).abs(),
+                        stop_limit_offset: (intent.stop_price - intent.stop_limit_price).abs(),
+                        breakeven_at_r: intent.breakeven_at_r,
+                        moved_to_breakeven: false,
                     },
                 );
                 info!(%symbol, %link_id, qty = %intent.qty, "entry placed");

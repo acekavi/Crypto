@@ -374,16 +374,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             },
             _ = escalation_interval.tick() => {
+                // Drives BOTH position-management passes — breakeven stops,
+                // then the escalation ladder — through the single seam that
+                // fixes their order; see `drive_position_management`.
+                //
                 // Mirrors the candle arm above exactly: Fatal halts the
                 // process, anything else is logged and the loop continues —
                 // one bad tick must not stop the ladder from being driven on
                 // every OTHER open position.
-                if let Err(e) = engine_loop.drive_stop_escalation(rest.clock().now_ms()).await {
+                if let Err(e) = engine_loop.drive_position_management(rest.clock().now_ms()).await {
                     if e.class() == ErrorClass::Fatal {
-                        error!(error = %e, "fatal error driving stop escalation; halting");
+                        error!(error = %e, "fatal error driving position management; halting");
                         return Err(e.into());
                     }
-                    warn!(error = %e, "driving stop escalation failed");
+                    warn!(error = %e, "driving position management failed");
                 }
             }
             _ = rerank.tick() => {
