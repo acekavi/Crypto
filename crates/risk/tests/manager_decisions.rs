@@ -23,6 +23,7 @@ fn long_signal() -> Signal {
         target_price: dec!(110),
         atr: dec!(2),
         signal_candle_open_ms: 1_700_000_000_000,
+        breakeven_at_r: None,
     }
 }
 

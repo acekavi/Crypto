@@ -104,6 +104,12 @@ pub struct IctParams {
     /// extreme; 2 puts it twice as far and halves the position for the same
     /// account risk.
     pub stop_widen_multiple: Decimal,
+    /// Pull the stop to entry once the trade has travelled this many multiples
+    /// of its initial risk in favour. `None` leaves the stop where it started.
+    ///
+    /// Carried on every `Signal` so the live engine and the simulator read one
+    /// value. Holding it only in `BacktestConfig` is how the two drift.
+    pub breakeven_at_r: Option<Decimal>,
     /// Which directions may trade. Both by default.
     pub allow_long: bool,
     pub allow_short: bool,
@@ -137,6 +143,7 @@ impl IctParams {
             use_order_block: false,
             ob_lookback: 10,
             stop_widen_multiple: Decimal::ONE,
+            breakeven_at_r: None,
             allow_long: true,
             allow_short: true,
             session_filter: true,
@@ -202,6 +209,25 @@ impl IctParams {
             reward_multiple: Decimal::from(3),
             session_filter: false,
             ..Self::variant_a()
+        }
+    }
+
+    /// The configuration the live bot trades.
+    ///
+    /// `liquidity_sweep_v1` with the target extended to 5R and a stop that
+    /// moves to entry at 2R. On the research window this raised profit factor
+    /// 1.291 -> 1.457 and lifted profitable quarters from 7/10 to 9/10, with
+    /// the gain spread across symbols rather than concentrated.
+    ///
+    /// NOT VALIDATED OUT OF SAMPLE. It was chosen by searching a 12-cell grid
+    /// on the research window, and the 330-day holdout was spent on v1. The
+    /// research numbers are evidence about the research window and nothing
+    /// else. Testnet paper trading is the only clean evidence available.
+    pub fn liquidity_sweep_v2() -> Self {
+        IctParams {
+            reward_multiple: Decimal::from(5),
+            breakeven_at_r: Some(Decimal::TWO),
+            ..Self::liquidity_sweep_v1()
         }
     }
 
@@ -845,5 +871,45 @@ fn evaluate_m15(
         target_price,
         atr,
         signal_candle_open_ms: candle.open_time_ms,
+        breakeven_at_r: p.breakeven_at_r,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn liquidity_sweep_v2_is_frozen() {
+        // Pins the configuration the live bot trades. A deliberate change means
+        // updating this test AND re-running the research-window backtest; an
+        // accidental one fails here.
+        let p = IctParams::liquidity_sweep_v2();
+        assert_eq!(p.reward_multiple, Decimal::from(5));
+        assert_eq!(p.breakeven_at_r, Some(Decimal::TWO));
+        assert_eq!(p.stop_widen_multiple, Decimal::ONE);
+        assert_eq!(p.structure_tf, Timeframe::H4);
+        assert_eq!(p.execution_tf, Timeframe::M15);
+        assert!(!p.require_mss);
+        assert!(p.use_pdh_pdl);
+        assert!(!p.use_session_levels);
+        assert!(p.use_order_block);
+        assert_eq!(p.ob_lookback, 5);
+        assert_eq!(p.stop_buffer_atr, Decimal::ZERO);
+        assert!(!p.session_filter);
+        assert!(p.allow_long);
+        assert!(p.allow_short);
+    }
+
+    #[test]
+    fn v2_differs_from_v1_only_in_reward_and_breakeven() {
+        let v1 = IctParams::liquidity_sweep_v1();
+        let v2 = IctParams::liquidity_sweep_v2();
+        let v1_relabelled = IctParams {
+            reward_multiple: v2.reward_multiple,
+            breakeven_at_r: v2.breakeven_at_r,
+            ..v1
+        };
+        assert_eq!(v1_relabelled, v2);
+    }
 }

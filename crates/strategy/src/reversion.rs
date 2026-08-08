@@ -247,5 +247,6 @@ fn evaluate_h1(
         target_price,
         atr,
         signal_candle_open_ms: candle.open_time_ms,
+        breakeven_at_r: None,
     })
 }

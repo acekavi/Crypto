@@ -23,6 +23,9 @@ pub struct Signal {
     /// Open time of the candle that produced this signal. Feeds the
     /// deterministic `orderLinkId`, so a retry cannot open a second position.
     pub signal_candle_open_ms: i64,
+    /// Multiple of initial risk at which the stop moves to entry. `None`
+    /// leaves the stop fixed for the life of the trade.
+    pub breakeven_at_r: Option<Decimal>,
 }
 
 impl Signal {
@@ -75,6 +78,7 @@ mod tests {
             target_price: dec!(110),
             atr: dec!(2),
             signal_candle_open_ms: 0,
+            breakeven_at_r: None,
         };
         assert_eq!(s.risk_distance(), dec!(5));
     }
@@ -91,6 +95,7 @@ mod tests {
             target_price: dec!(90),
             atr: dec!(2),
             signal_candle_open_ms: 0,
+            breakeven_at_r: None,
         };
         assert_eq!(s.risk_distance(), dec!(5));
     }
@@ -105,6 +110,7 @@ mod tests {
             target_price: dec!(110),
             atr: dec!(2),
             signal_candle_open_ms: 0,
+            breakeven_at_r: None,
         };
         assert_eq!(s.reward_multiple(), Some(dec!(2)));
     }
@@ -119,6 +125,7 @@ mod tests {
             target_price: dec!(90),
             atr: dec!(2),
             signal_candle_open_ms: 0,
+            breakeven_at_r: None,
         };
         assert_eq!(s.reward_multiple(), Some(dec!(2)));
     }
@@ -135,6 +142,7 @@ mod tests {
             target_price: dec!(110),
             atr: dec!(2),
             signal_candle_open_ms: 0,
+            breakeven_at_r: None,
         };
         assert_eq!(s.reward_multiple(), None);
     }

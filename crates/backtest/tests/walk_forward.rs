@@ -127,6 +127,7 @@ impl Strategy for TaggedStrategy {
             target_price: dec!(110),
             atr: dec!(1),
             signal_candle_open_ms: t,
+            breakeven_at_r: None,
         })
     }
 }

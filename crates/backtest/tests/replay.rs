@@ -121,6 +121,7 @@ impl Strategy for SignalOnceStrategy {
             target_price: dec!(110),
             atr: dec!(1),
             signal_candle_open_ms: ctx.candle.open_time_ms,
+            breakeven_at_r: None,
         })
     }
 }

@@ -136,6 +136,7 @@ impl Strategy for RandomEntryStrategy {
             target_price,
             atr,
             signal_candle_open_ms: ctx.candle.open_time_ms,
+            breakeven_at_r: None,
         })
     }
 }
