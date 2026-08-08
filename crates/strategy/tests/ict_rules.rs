@@ -285,3 +285,25 @@ fn the_configured_roles_drive_which_timeframes_are_subscribed() {
         "H4 serves as both bias and structure, so it appears once, and M5 must be present"
     );
 }
+
+#[test]
+fn sessions_are_fixed_utc_windows_and_the_first_match_wins() {
+    use strategy::ict::session_for;
+    let at = |h: i64| h * 3_600_000;
+
+    assert_eq!(session_for(at(2)), Some("asia"));
+    // London (07-16) and New York (13-21) overlap for three hours. The first
+    // match wins, so 14:00 is London — stated in the code and pinned here,
+    // because a silent overlap rule would change which extremes get recorded.
+    assert_eq!(session_for(at(14)), Some("london"));
+    assert_eq!(session_for(at(18)), Some("newyork"));
+    assert_eq!(
+        session_for(at(22)),
+        None,
+        "22:00 falls outside every window"
+    );
+
+    // Works on a real timestamp, not just the epoch.
+    let day = 1_700_000_000_000i64 / 86_400_000 * 86_400_000;
+    assert_eq!(session_for(day + at(2)), Some("asia"));
+}

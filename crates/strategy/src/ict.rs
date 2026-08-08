@@ -73,6 +73,17 @@ pub struct IctParams {
     pub structure_tf: Timeframe,
     /// Where fair value gaps are found and entries placed.
     pub execution_tf: Timeframe,
+    /// Also treat the previous day's high and low as sweepable liquidity.
+    ///
+    /// A fractal swing is an arbitrary level; PDH/PDL are levels every trader
+    /// watches, so stops genuinely cluster there. Adding them widens the top
+    /// of the funnel with a MORE principled level type, not a looser one.
+    pub use_pdh_pdl: bool,
+    /// Also treat the prior session's high and low as sweepable liquidity.
+    ///
+    /// Sessions are the fixed UTC windows in `SESSIONS`. Same reasoning as
+    /// PDH/PDL: resting orders build at each session's extremes.
+    pub use_session_levels: bool,
     /// Whether a market structure shift must confirm the sweep.
     ///
     /// Measured as the dominant bottleneck: only 3.2% of sweeps produced a
@@ -105,6 +116,8 @@ impl IctParams {
             structure_tf: Timeframe::H1,
             execution_tf: Timeframe::M15,
             require_mss: true,
+            use_pdh_pdl: false,
+            use_session_levels: false,
             session_filter: true,
             reward_multiple: Decimal::TWO,
         }
@@ -178,6 +191,18 @@ impl IctParams {
         ]
     }
 }
+
+/// Trading sessions as fixed UTC windows, `(name, open_ms, close_ms)`.
+///
+/// Fixed UTC rather than local time: London and New York both shift against
+/// UTC with daylight saving, so these are approximations for part of each
+/// year. Declared rather than silently treated as exact — correcting it needs
+/// a timezone database and brings its own edge cases.
+pub const SESSIONS: [(&str, i64, i64); 3] = [
+    ("asia", 0, 8 * 3_600_000),                  // 00:00-08:00 UTC
+    ("london", 7 * 3_600_000, 16 * 3_600_000),   // 07:00-16:00 UTC
+    ("newyork", 13 * 3_600_000, 21 * 3_600_000), // 13:00-21:00 UTC
+];
 
 // ----------------------------------------------------------- pure rules ----
 
@@ -310,6 +335,19 @@ pub struct Funnel {
     pub signals: usize,
 }
 
+/// Which session a timestamp falls in, if any.
+///
+/// Sessions overlap (London 07-16 and New York 13-21 share three hours), so
+/// the FIRST match wins and the order in `SESSIONS` decides. Stated because a
+/// silent overlap rule would change which extremes get recorded.
+pub fn session_for(open_time_ms: i64) -> Option<&'static str> {
+    let ms = open_time_ms.rem_euclid(86_400_000);
+    SESSIONS
+        .iter()
+        .find(|(_, o, c)| ms >= *o && ms < *c)
+        .map(|(name, _, _)| *name)
+}
+
 // ---------------------------------------------------------- the machine ----
 
 /// A confirmed sweep-and-shift waiting for a gap to enter.
@@ -338,6 +376,17 @@ struct SymbolState {
     /// Last three M15 candles, for gap detection.
     m15: VecDeque<Candle>,
     atr_m15: Atr,
+    /// Previous COMPLETED day's extremes. Set when a D1 candle closes, so the
+    /// level a sweep is measured against is one that already existed.
+    prev_day_high: Option<Decimal>,
+    prev_day_low: Option<Decimal>,
+    /// The session currently being accumulated, and its running extremes.
+    current_session: Option<&'static str>,
+    session_high: Option<Decimal>,
+    session_low: Option<Decimal>,
+    /// The last COMPLETED session's extremes.
+    prev_session_high: Option<Decimal>,
+    prev_session_low: Option<Decimal>,
 }
 
 impl SymbolState {
@@ -353,6 +402,13 @@ impl SymbolState {
             armed: None,
             m15: VecDeque::new(),
             atr_m15: Atr::new(p.atr_period),
+            prev_day_high: None,
+            prev_day_low: None,
+            current_session: None,
+            session_high: None,
+            session_low: None,
+            prev_session_high: None,
+            prev_session_low: None,
         }
     }
 
@@ -438,6 +494,11 @@ impl Strategy for IctStrategy {
         if ctx.timeframe == Timeframe::D1 {
             let e = state.ema_d1.update(candle.close);
             state.bias_d1 = bias_from(candle.close, e);
+            // Recorded on CLOSE, so the level a sweep is measured against is a
+            // completed day's extreme that already existed — never the day
+            // currently forming, which would be look-ahead.
+            state.prev_day_high = Some(candle.high);
+            state.prev_day_low = Some(candle.low);
         }
         if ctx.timeframe == Timeframe::H4 {
             let e = state.ema_h4.update(candle.close);
@@ -447,6 +508,7 @@ impl Strategy for IctStrategy {
             track_structure(&p, state, candle, &mut self.funnel);
         }
         if ctx.timeframe == p.execution_tf {
+            track_sessions(state, candle);
             return evaluate_m15(&p, state, ctx, &mut self.funnel);
         }
         None
@@ -487,7 +549,21 @@ fn track_structure(p: &IctParams, state: &mut SymbolState, candle: &Candle, f: &
         return;
     }
 
-    if let Some(direction) = detect_sweep(candle, prior_high, prior_low) {
+    // Every liquidity pool this candle could have swept, most-significant
+    // first. A sweep of ANY of them arms the setup; the first match wins, so
+    // the order here decides attribution when a candle takes out two at once.
+    let mut pools: Vec<(Option<Decimal>, Option<Decimal>)> = vec![(prior_high, prior_low)];
+    if p.use_pdh_pdl {
+        pools.push((state.prev_day_high, state.prev_day_low));
+    }
+    if p.use_session_levels {
+        pools.push((state.prev_session_high, state.prev_session_low));
+    }
+    let swept = pools
+        .into_iter()
+        .find_map(|(h, l)| detect_sweep(candle, h, l));
+
+    if let Some(direction) = swept {
         let extreme = match direction {
             Direction::Bullish => candle.low,
             Direction::Bearish => candle.high,
@@ -506,6 +582,34 @@ fn track_structure(p: &IctParams, state: &mut SymbolState, candle: &Candle, f: &
                 armed_at: state.h1_seen,
             });
         }
+    }
+}
+
+/// Accumulate the running session's extremes, rolling them to `prev_*` when
+/// the session changes.
+///
+/// Only a COMPLETED session becomes sweepable. Using the session still in
+/// progress would mean sweeping a level that is still moving.
+fn track_sessions(state: &mut SymbolState, candle: &Candle) {
+    let now = session_for(candle.open_time_ms);
+    if now != state.current_session {
+        if state.current_session.is_some() {
+            state.prev_session_high = state.session_high;
+            state.prev_session_low = state.session_low;
+        }
+        state.current_session = now;
+        state.session_high = None;
+        state.session_low = None;
+    }
+    if now.is_some() {
+        state.session_high = Some(match state.session_high {
+            Some(h) if h >= candle.high => h,
+            _ => candle.high,
+        });
+        state.session_low = Some(match state.session_low {
+            Some(l) if l <= candle.low => l,
+            _ => candle.low,
+        });
     }
 }
 
