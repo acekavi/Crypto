@@ -10,7 +10,7 @@ use engine::{
 use exchange::ExchangeClient;
 use exchange::bybit::transport::ExchangeError;
 use exchange::bybit::ws_private::AccountEvent;
-use persistence::Journal;
+use persistence::{Journal, JournalError, ProtectionRecord, TradeEvent, TradeEventKind};
 use risk::{Decision, Refusal, RiskManager};
 use rust_decimal::Decimal;
 use strategy::{MarketContext, Strategy};
@@ -26,6 +26,10 @@ use tracing::{error, info, warn};
 /// breakeven threshold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StopProtection {
+    /// The entry order this position was opened by. Carried so a journal row,
+    /// a trade event and an `orders` row can be correlated into one audit
+    /// trail; the exchange never hands it back on a `Position`.
+    order_link_id: String,
     side: Side,
     /// The stop's trigger price. Rewritten to the entry price once
     /// `drive_breakeven_stops` has actually moved the stop, so the escalation
@@ -57,6 +61,42 @@ struct StopProtection {
     moved_to_breakeven: bool,
 }
 
+impl StopProtection {
+    /// The durable form of this record. Every field the engine needs to keep
+    /// managing the position travels, because a restart rebuilds the whole
+    /// protection from the row and nothing else can supply the parts
+    /// `Position` does not carry.
+    fn to_record(&self, symbol: &Symbol, updated_at_ms: i64) -> ProtectionRecord {
+        ProtectionRecord {
+            symbol: symbol.clone(),
+            order_link_id: self.order_link_id.clone(),
+            side: self.side,
+            trigger: self.trigger,
+            atr: self.atr,
+            entry_price: self.entry_price,
+            initial_risk: self.initial_risk,
+            stop_limit_offset: self.stop_limit_offset,
+            breakeven_at_r: self.breakeven_at_r,
+            moved_to_breakeven: self.moved_to_breakeven,
+            updated_at_ms,
+        }
+    }
+
+    fn from_record(r: &ProtectionRecord) -> Self {
+        StopProtection {
+            order_link_id: r.order_link_id.clone(),
+            side: r.side,
+            trigger: r.trigger,
+            atr: r.atr,
+            entry_price: r.entry_price,
+            initial_risk: r.initial_risk,
+            stop_limit_offset: r.stop_limit_offset,
+            breakeven_at_r: r.breakeven_at_r,
+            moved_to_breakeven: r.moved_to_breakeven,
+        }
+    }
+}
+
 /// Why a candle produced no order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
@@ -86,6 +126,10 @@ pub struct EngineLoop {
     risk: RiskManager,
     client: Arc<dyn ExchangeClient>,
     journal: Arc<Journal>,
+    /// SHA-256 of the effective config, stamped on every trade event so the
+    /// audit trail says which ruleset produced it. `Executor` keeps its own
+    /// copy for the same reason on `orders`.
+    config_hash: String,
     executor: Executor,
     tracker: OrderTracker,
     store: CandleStore,
@@ -110,6 +154,16 @@ pub struct EngineLoop {
     /// every tick the ladder stays exhausted.
     halted_for_exhaustion: HashSet<Symbol>,
     ladder: EscalationLadder,
+    /// The most recent timestamp any input carried: a closed candle's open
+    /// time, an escalation tick, an order update, or the startup clock.
+    ///
+    /// `AccountEvent::PositionClosed` carries no timestamp of its own, and the
+    /// journal rows it writes must still be stamped with something meaningful.
+    /// Reading the wall clock here instead would be wrong for the same reason
+    /// `crates/backtest`'s `no_wall_clock` test forbids it there: "now" is
+    /// whatever the data says it is. Advanced monotonically, so an out-of-order
+    /// message cannot rewind the log.
+    last_observed_ms: i64,
     /// Drawdown breaches observed. Under `HaltPolicy::Enforce` each of these
     /// also refused the entry; under `RecordOnly` (backtests) they were only
     /// counted, so a run can report how often its safety net would have
@@ -129,12 +183,17 @@ impl EngineLoop {
         entry_expiry_candles: u32,
         warmup_candles: usize,
     ) -> Self {
-        let executor = Executor::new(Arc::clone(&client), Arc::clone(&journal), config_hash);
+        let executor = Executor::new(
+            Arc::clone(&client),
+            Arc::clone(&journal),
+            config_hash.clone(),
+        );
         EngineLoop {
             strategy,
             risk,
             client,
             journal,
+            config_hash,
             executor,
             tracker: OrderTracker::new(entry_expiry_candles),
             store: CandleStore::new(warmup_candles),
@@ -149,8 +208,176 @@ impl EngineLoop {
             triggered_stops: HashMap::new(),
             halted_for_exhaustion: HashSet::new(),
             ladder: EscalationLadder::defaults(),
+            last_observed_ms: 0,
             halt_events: 0,
         }
+    }
+
+    /// Advance the clock this engine stamps journal rows with.
+    ///
+    /// Monotonic: a private-feed message that arrives out of order must not
+    /// make the audit trail travel backwards.
+    fn observe_ms(&mut self, ms: i64) {
+        self.last_observed_ms = self.last_observed_ms.max(ms);
+    }
+
+    /// Mirror a symbol's in-memory protection into the journal.
+    ///
+    /// Called at every site that mutates `protections`, so the table is
+    /// authoritative at all times rather than a periodic snapshot.
+    ///
+    /// A failure is logged at `error!` and swallowed. Losing an audit row is
+    /// bad; refusing to manage an open position because a write failed is
+    /// worse, so nothing here is allowed to reach the caller's error type.
+    async fn persist_protection(&self, symbol: &Symbol, at_ms: i64) {
+        let Some(protection) = self.protections.get(symbol) else {
+            return;
+        };
+        if let Err(e) = self
+            .journal
+            .upsert_protection(&protection.to_record(symbol, at_ms))
+            .await
+        {
+            error!(
+                %symbol,
+                kind = e.kind(),
+                "persisting a stop protection failed; the journal is now behind the engine"
+            );
+        }
+    }
+
+    /// Drop a symbol's protection row and record that its position is gone.
+    ///
+    /// Same failure contract as `persist_protection`: logged, never
+    /// propagated.
+    async fn forget_protection(&self, symbol: &Symbol, link_id: Option<&str>, detail: &str) {
+        if let Err(e) = self.journal.delete_protection(symbol).await {
+            error!(
+                %symbol,
+                kind = e.kind(),
+                "deleting a stop protection failed; a stale row may be adopted at the next restart"
+            );
+        }
+        self.record_event(
+            symbol,
+            link_id,
+            TradeEventKind::PositionClosed,
+            detail.to_string(),
+        )
+        .await;
+    }
+
+    /// Append one lifecycle event to the audit log.
+    ///
+    /// Stamped with `last_observed_ms` rather than the wall clock so a
+    /// backtest or a replayed feed logs the time the data describes.
+    ///
+    /// Same failure contract as `persist_protection`.
+    async fn record_event(
+        &self,
+        symbol: &Symbol,
+        link_id: Option<&str>,
+        kind: TradeEventKind,
+        detail: String,
+    ) {
+        let event = TradeEvent {
+            at_ms: self.last_observed_ms,
+            symbol: symbol.clone(),
+            order_link_id: link_id.map(str::to_string),
+            kind,
+            detail,
+            config_hash: self.config_hash.clone(),
+        };
+        if let Err(e) = self.journal.record_event(&event).await {
+            error!(
+                %symbol,
+                event = kind.as_str(),
+                kind = e.kind(),
+                "recording a trade event failed"
+            );
+        }
+    }
+
+    /// Rebuild the in-memory protection map from the journal, keeping only
+    /// symbols the exchange currently reports as open.
+    ///
+    /// Call once at startup, immediately after `reconcile` and before any
+    /// candle is processed. Without it a restart mid-trade orphans the
+    /// position: no breakeven management, no escalation ladder, and a 1:5
+    /// target can hold for days, so a restart mid-trade is expected rather
+    /// than hypothetical.
+    ///
+    /// `open` is the exchange's own answer — `ReconcileReport::adopted_positions`
+    /// is exactly the list `reconcile` just read from it. The exchange is
+    /// authoritative about which positions exist and the journal supplies only
+    /// what the exchange does not report, so a journal row with no matching
+    /// open position is stale: it is deleted and recorded closed, never
+    /// adopted. Letting the journal resurrect a position the exchange does not
+    /// report would have the engine amending stops for something that is not
+    /// there.
+    ///
+    /// Unlike the write-through paths, a failure to READ is surfaced rather
+    /// than swallowed — the same reasoning as `load_baselines`. This runs
+    /// before any candle, so there is no in-flight decision a loud failure
+    /// could disrupt, and "the protections could not be loaded" is precisely
+    /// what an operator must see before trading resumes rather than have
+    /// silently treated as "there were none".
+    ///
+    /// Returns how many protections were adopted.
+    pub async fn restore_protections(
+        &mut self,
+        open: &[Symbol],
+        now_ms: i64,
+    ) -> Result<usize, JournalError> {
+        self.observe_ms(now_ms);
+        let saved = self.journal.load_protections().await?;
+        let open: HashSet<&str> = open.iter().map(Symbol::as_str).collect();
+
+        let mut adopted = 0;
+        for record in saved {
+            if !open.contains(record.symbol.as_str()) {
+                warn!(
+                    symbol = %record.symbol,
+                    "a journalled protection has no open position at the exchange; dropping it"
+                );
+                self.forget_protection(
+                    &record.symbol,
+                    Some(&record.order_link_id),
+                    "no open position at the exchange on restart",
+                )
+                .await;
+                continue;
+            }
+
+            info!(
+                symbol = %record.symbol,
+                trigger = %record.trigger,
+                moved_to_breakeven = record.moved_to_breakeven,
+                "restored a stop protection from the journal"
+            );
+            let symbol = record.symbol.clone();
+            let link_id = record.order_link_id.clone();
+            let detail = format!(
+                "trigger {}, breakeven {}",
+                record.trigger,
+                if record.moved_to_breakeven {
+                    "already at entry"
+                } else {
+                    "pending"
+                }
+            );
+            self.protections
+                .insert(symbol.clone(), StopProtection::from_record(&record));
+            self.record_event(
+                &symbol,
+                Some(&link_id),
+                TradeEventKind::ProtectionRestored,
+                detail,
+            )
+            .await;
+            adopted += 1;
+        }
+        Ok(adopted)
     }
 
     /// How many drawdown breaches this run observed.
@@ -221,6 +448,7 @@ impl EngineLoop {
     pub async fn on_account_event(&mut self, event: &AccountEvent) {
         match event {
             AccountEvent::OrderUpdate(order) => {
+                self.observe_ms(order.updated_time_ms);
                 self.tracker.on_order_update(order);
                 // Mirror the state change into the journal. A journal failure
                 // must never disturb trading, so it is logged, not propagated.
@@ -246,6 +474,25 @@ impl EngineLoop {
                 {
                     warn!(link_id = %order.order_link_id, error = %e, "journalling an order update failed");
                 }
+                // The audit log records the lifecycle, not just the current
+                // state the row above overwrites: a fill that later closed is
+                // otherwise indistinguishable from an entry that never filled.
+                let kind = match order.state {
+                    OrderState::Filled | OrderState::PartiallyFilled => {
+                        Some(TradeEventKind::EntryFilled)
+                    }
+                    OrderState::Cancelled => Some(TradeEventKind::EntryCancelled),
+                    OrderState::New | OrderState::Rejected => None,
+                };
+                if let Some(kind) = kind {
+                    self.record_event(
+                        &order.symbol,
+                        Some(&order.order_link_id),
+                        kind,
+                        format!("{} of {} at {}", order.cum_exec_qty, order.qty, order.price),
+                    )
+                    .await;
+                }
             }
             AccountEvent::PositionClosed { symbol } => {
                 info!(%symbol, "position closed");
@@ -253,9 +500,18 @@ impl EngineLoop {
                 // the ladder for it is done. Without this, a symbol that
                 // trades repeatedly over a multi-month run would leave a
                 // stale entry behind every time, growing both maps forever.
+                let link_id = self
+                    .protections
+                    .get(symbol)
+                    .map(|p| p.order_link_id.clone());
                 self.protections.remove(symbol);
                 self.triggered_stops.remove(symbol);
                 self.halted_for_exhaustion.remove(symbol);
+                // The journal row must go with the in-memory entry, or the
+                // next restart would adopt a protection for a position that
+                // has already closed.
+                self.forget_protection(symbol, link_id.as_deref(), "the exchange reports size 0")
+                    .await;
             }
             AccountEvent::PositionUpdate(_) | AccountEvent::WalletUpdate(_) => {}
         }
@@ -349,6 +605,7 @@ impl EngineLoop {
         if self.execution_timeframe() != Some(tf) {
             return Ok(());
         }
+        self.observe_ms(candle.open_time_ms);
 
         let Some(protection) = self.protections.get(symbol) else {
             return Ok(());
@@ -364,6 +621,8 @@ impl EngineLoop {
 
         let side = protection.side;
         let entry_price = protection.entry_price;
+        let old_trigger = protection.trigger;
+        let link_id = protection.order_link_id.clone();
         let travelled = match side {
             Side::Buy => candle.high - entry_price,
             Side::Sell => entry_price - candle.low,
@@ -414,6 +673,17 @@ impl EngineLoop {
                     %limit_price,
                     "stop moved to entry; the trade can no longer lose"
                 );
+                // Durable before the next candle: an in-memory-only breakeven
+                // flag would be lost by a restart, and the stop already resting
+                // at entry would then be escalated from the wrong trigger.
+                self.persist_protection(symbol, candle.open_time_ms).await;
+                self.record_event(
+                    symbol,
+                    Some(&link_id),
+                    TradeEventKind::StopMovedToBreakeven,
+                    format!("stop {old_trigger} -> {entry_price} (entry), limit {limit_price}"),
+                )
+                .await;
             }
             Err(e) => {
                 warn!(
@@ -421,6 +691,16 @@ impl EngineLoop {
                     error = %e,
                     "moving the stop to entry failed; retrying next candle"
                 );
+                // No protection write: the in-memory state did not change
+                // either, so the journal is still correct. Only the attempt is
+                // recorded.
+                self.record_event(
+                    symbol,
+                    Some(&link_id),
+                    TradeEventKind::StopAmendFailed,
+                    format!("moving the stop to {entry_price} was rejected: {e}"),
+                )
+                .await;
             }
         }
 
@@ -443,6 +723,7 @@ impl EngineLoop {
     /// per-position loop — only the two batch fetches at the top can fail
     /// the whole call.
     pub async fn drive_stop_escalation(&mut self, now_ms: i64) -> Result<(), ExchangeError> {
+        self.observe_ms(now_ms);
         let positions = self.client.positions().await?;
         let open: HashSet<Symbol> = positions.iter().map(|p| p.symbol.clone()).collect();
 
@@ -453,11 +734,28 @@ impl EngineLoop {
         // `PositionClosed` handler — that event can be missed (a dropped
         // private-feed message), while `positions()` here is the exchange's
         // own current truth.
+        //
+        // The journal rows go with them: a protection the exchange no longer
+        // backs must not survive to be adopted by the next restart.
+        let pruned: Vec<(Symbol, String)> = self
+            .protections
+            .iter()
+            .filter(|(symbol, _)| !open.contains(*symbol))
+            .map(|(symbol, p)| (symbol.clone(), p.order_link_id.clone()))
+            .collect();
         self.protections.retain(|symbol, _| open.contains(symbol));
         self.triggered_stops
             .retain(|symbol, _| open.contains(symbol));
         self.halted_for_exhaustion
             .retain(|symbol| open.contains(symbol));
+        for (symbol, link_id) in &pruned {
+            self.forget_protection(
+                symbol,
+                Some(link_id),
+                "the exchange no longer reports this position",
+            )
+            .await;
+        }
 
         let tickers = self.client.tickers().await?;
         let last_price: HashMap<&str, Decimal> = tickers
@@ -466,16 +764,23 @@ impl EngineLoop {
             .collect();
 
         for position in &positions {
-            let Some(protection) = self.protections.get(&position.symbol) else {
+            // Copied out rather than held as a borrow: the branches below take
+            // `&self` (to write through to the journal) and `&mut` on other
+            // fields, which a live borrow of `self.protections` would block.
+            let Some((side, trigger, atr, link_id)) = self
+                .protections
+                .get(&position.symbol)
+                .map(|p| (p.side, p.trigger, p.atr, p.order_link_id.clone()))
+            else {
                 continue;
             };
             let Some(&price) = last_price.get(position.symbol.as_str()) else {
                 continue;
             };
 
-            let triggered = match protection.side {
-                Side::Buy => price <= protection.trigger,
-                Side::Sell => price >= protection.trigger,
+            let triggered = match side {
+                Side::Buy => price <= trigger,
+                Side::Sell => price >= trigger,
             };
             if !triggered {
                 continue;
@@ -488,16 +793,16 @@ impl EngineLoop {
                     // this tick only starts tracking — it must not also act.
                     warn!(
                         symbol = %position.symbol,
-                        trigger = %protection.trigger,
+                        %trigger,
                         "stop triggered without filling; starting the escalation ladder"
                     );
                     self.triggered_stops.insert(
                         position.symbol.clone(),
                         TriggeredStop {
                             symbol: position.symbol.clone(),
-                            side: protection.side,
-                            trigger: protection.trigger,
-                            atr: protection.atr,
+                            side,
+                            trigger,
+                            atr,
                             rung: 0,
                             rung_started_ms: now_ms,
                         },
@@ -517,6 +822,21 @@ impl EngineLoop {
                                     entry.rung = rung;
                                     entry.rung_started_ms = now_ms;
                                 }
+                                // The trigger itself is unchanged — only the
+                                // limit widened — but refreshing the row keeps
+                                // `updated_at_ms` honest about when the engine
+                                // last touched this position.
+                                self.persist_protection(&position.symbol, now_ms).await;
+                                self.record_event(
+                                    &position.symbol,
+                                    Some(&link_id),
+                                    TradeEventKind::StopEscalated,
+                                    format!(
+                                        "rung {rung}: limit {limit_price} at trigger {}",
+                                        stop.trigger
+                                    ),
+                                )
+                                .await;
                             }
                             // Leave the rung and its start time UNCHANGED.
                             // Advancing here would skip a rung that never
@@ -547,10 +867,24 @@ impl EngineLoop {
                             if let Err(e) = self.journal.set_halt(&reason, now_ms).await {
                                 warn!(
                                     symbol = %position.symbol,
-                                    error = %e,
+                                    kind = e.kind(),
                                     "persisting the escalation-exhausted halt failed"
                                 );
                             }
+                            self.record_event(
+                                &position.symbol,
+                                Some(&link_id),
+                                TradeEventKind::StopLadderExhausted,
+                                reason.clone(),
+                            )
+                            .await;
+                            self.record_event(
+                                &position.symbol,
+                                None,
+                                TradeEventKind::HaltSet,
+                                reason,
+                            )
+                            .await;
                         }
                     }
                 },
@@ -572,9 +906,11 @@ impl EngineLoop {
     /// invisible to `drive_breakeven_stops` — see
     /// `protect_with_breakeven_for_test` for that.
     pub fn protect_for_test(&mut self, symbol: Symbol, side: Side, trigger: Decimal, atr: Decimal) {
+        let order_link_id = format!("test-{symbol}");
         self.protections.insert(
             symbol,
             StopProtection {
+                order_link_id,
                 side,
                 trigger,
                 atr,
@@ -604,9 +940,11 @@ impl EngineLoop {
         atr: Decimal,
         breakeven_at_r: Option<Decimal>,
     ) {
+        let order_link_id = format!("test-{symbol}");
         self.protections.insert(
             symbol,
             StopProtection {
+                order_link_id,
                 side,
                 trigger,
                 atr,
@@ -721,6 +1059,7 @@ impl EngineLoop {
         tf: Timeframe,
         candle: &Candle,
     ) -> Result<CandleOutcome, ExchangeError> {
+        self.observe_ms(candle.open_time_ms);
         let Some(instrument) = self.instruments.get(symbol.as_str()).cloned() else {
             return Ok(CandleOutcome::Skipped(SkipReason::UnknownInstrument));
         };
@@ -754,7 +1093,15 @@ impl EngineLoop {
                     return Err(e);
                 }
                 warn!(%link_id, error = %e, "cancelling an expired entry failed");
+                continue;
             }
+            self.record_event(
+                &sym,
+                Some(&link_id),
+                TradeEventKind::EntryExpired,
+                format!("cancelled the remainder; {filled} had filled"),
+            )
+            .await;
         }
 
         if !self.store.is_warm(symbol, tf) {
@@ -807,12 +1154,13 @@ impl EngineLoop {
                 if matches!(
                     refusal,
                     Refusal::DailyDrawdown { .. } | Refusal::TotalDrawdown { .. }
-                ) && let Err(e) = self
-                    .journal
-                    .set_halt(&refusal.to_string(), candle.open_time_ms)
-                    .await
-                {
-                    warn!(%symbol, error = %e, "persisting the drawdown halt failed");
+                ) {
+                    let reason = refusal.to_string();
+                    if let Err(e) = self.journal.set_halt(&reason, candle.open_time_ms).await {
+                        warn!(%symbol, kind = e.kind(), "persisting the drawdown halt failed");
+                    }
+                    self.record_event(symbol, None, TradeEventKind::HaltSet, reason)
+                        .await;
                 }
                 Ok(CandleOutcome::Refused(refusal))
             }
@@ -833,6 +1181,7 @@ impl EngineLoop {
                 self.protections.insert(
                     intent.symbol.clone(),
                     StopProtection {
+                        order_link_id: link_id.clone(),
                         side: intent.side,
                         trigger: intent.stop_price,
                         atr: intent.atr,
@@ -844,6 +1193,29 @@ impl EngineLoop {
                     },
                 );
                 info!(%symbol, %link_id, qty = %intent.qty, "entry placed");
+                // Durable immediately, not at the next fill: the stop rides on
+                // the entry order itself, so from this moment a restart that
+                // found the position open would otherwise have no record of
+                // where its stop sits or when it should move.
+                self.persist_protection(&intent.symbol, candle.open_time_ms)
+                    .await;
+                self.record_event(
+                    &intent.symbol,
+                    Some(&link_id),
+                    TradeEventKind::EntryPlaced,
+                    format!("{} at {}", intent.qty, intent.entry_price),
+                )
+                .await;
+                self.record_event(
+                    &intent.symbol,
+                    Some(&link_id),
+                    TradeEventKind::StopPlaced,
+                    format!(
+                        "trigger {} limit {} target {}",
+                        intent.stop_price, intent.stop_limit_price, intent.target_price
+                    ),
+                )
+                .await;
                 Ok(CandleOutcome::Placed { link_id })
             }
         }

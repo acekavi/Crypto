@@ -11,7 +11,7 @@ use exchange::bybit::sign::Credentials;
 use exchange::bybit::ws_private::BybitPrivateFeed;
 use exchange::bybit::ws_public::BybitPublicFeed;
 use exchange::{ExchangeClient, MarketEvent, Subscription};
-use persistence::{Journal, JournalError, spawn_sync_task};
+use persistence::{Journal, spawn_sync_task};
 use risk::{RiskManager, RiskParams};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
@@ -108,13 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // connection target, which would leak TURSO_DATABASE_URL
                     // (a credential-adjacent value) into logs on exactly the
                     // misconfiguration path most likely to trigger it.
-                    let kind = match &e {
-                        JournalError::Db(_) => "Db",
-                        JournalError::Decode(_) => "Decode",
-                        JournalError::Timeout(_) => "Timeout",
-                    };
                     error!(
-                        kind,
+                        kind = e.kind(),
                         "Turso sync unavailable; falling back to local journal"
                     );
                     Journal::open_local("data/bot.db").await?
@@ -243,6 +238,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warn!(%symbol, "adopted position — verify it carries a stop and target");
     }
 
+    // Rebuild the stop protections for the positions reconciliation just
+    // adopted. This must run AFTER reconcile and BEFORE the loop starts: the
+    // exchange decides which positions exist, and the journal supplies only
+    // what the exchange does not report — a trigger, the 1R the position was
+    // sized against, and whether its stop has already moved to entry. Without
+    // it a restart mid-trade orphans the position: no breakeven management and
+    // no escalation ladder, for a target that can take days to reach.
+    //
+    // `adopted_positions` is exactly the list `reconcile` read from the
+    // exchange a moment ago, so no second `positions()` call can disagree with
+    // it. A journal row with no matching position is stale and is dropped
+    // there, never adopted.
+    let restored = engine_loop
+        .restore_protections(&report.adopted_positions, rest.clock().now_ms())
+        .await?;
+    info!(
+        restored,
+        open_positions = report.adopted_positions.len(),
+        "restored stop protections from the journal"
+    );
+
     // 6. Establish the tradable universe. A pinned list is used verbatim; only
     //    when none is configured is the turnover/age screen consulted, which
     //    always keeps symbols reconciliation just adopted so their candles keep
@@ -364,12 +380,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // See the Turso-connect error above: the Display of a
                     // sync failure can carry TURSO_DATABASE_URL, so only the
                     // error variant is logged, never its message.
-                    let kind = match &e {
-                        JournalError::Db(_) => "Db",
-                        JournalError::Decode(_) => "Decode",
-                        JournalError::Timeout(_) => "Timeout",
-                    };
-                    error!(kind, "final journal push failed");
+                    error!(kind = e.kind(), "final journal push failed");
                 }
                 return Ok(());
             }

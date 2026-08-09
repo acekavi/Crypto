@@ -31,6 +31,23 @@ pub enum JournalError {
     Timeout(Duration),
 }
 
+impl JournalError {
+    /// The variant's name, and nothing else.
+    ///
+    /// A `Db` error's message comes from the underlying turso client and on the
+    /// synced path commonly embeds the connection target — which is
+    /// `TURSO_DATABASE_URL`, a credential-adjacent value. Logs therefore carry
+    /// this rather than the `Display`, everywhere a journal failure is
+    /// reported.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            JournalError::Db(_) => "Db",
+            JournalError::Decode(_) => "Decode",
+            JournalError::Timeout(_) => "Timeout",
+        }
+    }
+}
+
 impl From<turso::Error> for JournalError {
     fn from(e: turso::Error) -> Self {
         JournalError::Db(e.to_string())
@@ -614,6 +631,28 @@ impl Journal {
     pub async fn event_count(&self) -> Result<i64, JournalError> {
         self.scalar_i64("SELECT COUNT(*) FROM trade_events", ())
             .await
+    }
+
+    /// Test-only: make every protection and trade-event write fail from here
+    /// on, by dropping the two tables they target.
+    ///
+    /// The engine's contract is that a journal write failure is logged and
+    /// swallowed — losing an audit row is bad, refusing to manage an open
+    /// position is worse — and that rule is otherwise untestable: `Journal` is
+    /// a concrete type rather than a trait, so there is no double to inject.
+    /// `#[cfg(test)]` cannot gate this, for the same reason
+    /// `EngineLoop::protect_for_test` is a plain `pub fn`: the test that needs
+    /// it lives in another crate, which links this one as an ordinary
+    /// dependency.
+    ///
+    /// Leaves every other table intact, so equity, halt and order writes keep
+    /// working and a test can tell "the journal is gone" apart from "these two
+    /// writes fail".
+    pub async fn fail_writes_for_test(&self) -> Result<(), JournalError> {
+        for sql in ["DROP TABLE stop_protections", "DROP TABLE trade_events"] {
+            self.conn.execute(sql, ()).await?;
+        }
+        Ok(())
     }
 
     pub async fn record_equity(&self, equity: Decimal, at_ms: i64) -> Result<(), JournalError> {
