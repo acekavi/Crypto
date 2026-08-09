@@ -105,16 +105,70 @@ Stated in advance so it cannot be reinterpreted later:
 - Drawdown past 20%
 - Profit factor below 1.2 over a full quarter of forward trading
 
-## Known live/backtest divergences
+## Live/backtest parity
 
-1. **Breakeven trigger sampling.** The backtest reads `candle.high`/`candle.low`; the live engine
-   samples the ticker last price on its timer. A spike that crosses 2R and fully retraces between two
-   polls moves the stop in the backtest but not live. The divergence runs toward trading *less*
-   favourably than measured.
-2. **Restart loses stop protections.** `EngineLoop::protections` is in-memory and populated only on
-   candle close; nothing rebuilds it from `reconcile`. After a restart, an open position's breakeven
-   and escalation records are gone. Pre-existing — it disables the escalation ladder across restarts
-   too — and closing it needs journal persistence that has not been built.
+Two divergences existed and both are closed.
+
+**Breakeven trigger sampling.** The live engine used to sample the ticker last price on a 10s timer
+while the simulator read a closed candle's high/low — so a wick that crossed 2R and retraced between
+polls armed the stop in the backtest but not live. The live check now runs on **execution-timeframe
+candle close, from that candle's high/low**, matching `SimulatedExchange::advance` exactly: after the
+candle's exit resolves, before the strategy sees it.
+
+The execution timeframe is *derived* (the shortest of the strategy's declared timeframes), the same
+way `replay.rs` derives it — not hardcoded — so the two cannot drift if the strategy's timeframes
+change.
+
+`drive_candle_close` is called by `bot/src/main.rs` and deliberately **not** by the replay loop.
+Replay already applies breakeven inside the simulator; having it also run the live pass would
+double-apply on the same candle, and the two set different stops — the simulator rests at entry
+exactly, the live amend at `entry ∓ stop_limit_offset`. Every breakeven trade would have exited
+slightly worse than measured.
+
+**Warm-up length.** `IctStrategy::warmup_candles()` returned `bias_ema + 50` = 100 while the
+validated backtest ran with 250, so the live bot warmed on 150 fewer daily candles. It now returns
+250. This was never a backtest-side problem — `replay.rs` uses
+`cfg.warmup_candles.max(strategy_warmup)`, and `max(250, 100)` and `max(250, 250)` are both 250 — so
+the measured result is unchanged, verified.
+
+## Durability
+
+Every trade and every state change is written to `data/bot.db` as it happens.
+
+**`stop_protections`** — one row per open position, mirroring `EngineLoop::protections`. Written on
+every mutation, not snapshotted periodically, so the database is authoritative. At startup
+`restore_protections` runs immediately after `reconcile` and rebuilds the in-memory map.
+
+**The exchange is authoritative about which positions exist.** A journal row is adopted only when
+that symbol is currently open at the exchange; a row with no matching position is stale, and gets
+deleted and recorded as `PositionClosed`. The journal supplies what the exchange does not report —
+the stop's trigger, the initial risk, the breakeven threshold, whether it has already moved — and
+nothing more. It can never resurrect a position the exchange does not report.
+
+**`trade_events`** — append-only, never updated or deleted. `EntryPlaced`, `EntryFilled`,
+`EntryExpired`, `EntryCancelled`, `StopPlaced`, `StopMovedToBreakeven`, `StopAmendFailed`,
+`StopEscalated`, `StopLadderExhausted`, `PositionClosed`, `ProtectionRestored`, `HaltSet`,
+`HaltCleared`. Ordered by `(at_ms, id)`, both INTEGER, so events written in the same millisecond keep
+insertion order.
+
+```bash
+sqlite3 data/bot.db "SELECT kind, symbol, detail FROM trade_events ORDER BY at_ms, id LIMIT 20;"
+sqlite3 data/bot.db "SELECT symbol, trigger, moved_to_breakeven FROM stop_protections;"
+```
+
+**A journal write failure never blocks trading.** It is logged at `error!` and the engine continues
+managing the position. Losing an audit row is bad; refusing to manage an open trade is worse. A
+failure to *read* the protection table at startup does halt, rather than silently starting with no
+protections at all.
+
+All Decimal columns are TEXT and are never ordered or compared in SQL — `"9" > "10000"`
+lexicographically. Parse into `Decimal` and compare in Rust.
+
+### What is still not guaranteed
+
+A crash between placing an order and journalling it leaves the exchange ahead of the journal.
+`reconcile` is what closes that gap, and it adopts from the exchange. The journal is not a substitute
+for reconciliation and does not try to be.
 
 ## History
 
