@@ -757,6 +757,20 @@ impl EngineLoop {
             .await;
         }
 
+        // Nothing can escalate without a recorded stop, and the ticker fetch is
+        // by far the most expensive call here: `/v5/market/tickers` returns
+        // every linear symbol — 812 on testnet, measured at 4.5-10s against a
+        // 10s client timeout — while this loop needs prices for at most the
+        // open positions. Bailing out when there is nothing to measure turns a
+        // large request every ten seconds into none at all, and a timeout on it
+        // used to abort the whole escalation pass.
+        if !positions
+            .iter()
+            .any(|p| self.protections.contains_key(&p.symbol))
+        {
+            return Ok(());
+        }
+
         let tickers = self.client.tickers().await?;
         let last_price: HashMap<&str, Decimal> = tickers
             .iter()

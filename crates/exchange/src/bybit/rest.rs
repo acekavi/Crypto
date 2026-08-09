@@ -18,7 +18,11 @@ use super::wire::{
 };
 use crate::traits::ExchangeClient;
 
-const RECV_WINDOW: u32 = 5_000;
+// Bybit rejects a signed request whose timestamp falls outside this window
+// (retCode 10002). Testnet round trips were measured at 4.5-10s, which leaves
+// the clock-offset estimate uncertain by several seconds — well outside the
+// 5s default. Bybit's own guidance for persistent 10002 is to widen it.
+const RECV_WINDOW: u32 = 20_000;
 const MAX_ATTEMPTS: u32 = 5;
 const BACKOFF_BASE_MS: u64 = 200;
 const BACKOFF_JITTER: f64 = 0.25;
@@ -69,7 +73,10 @@ impl BybitRest {
             base_url: base_url.trim_end_matches('/').to_string(),
             creds,
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                // `/v5/market/tickers` for all linear symbols was measured at
+                // 4.5-10s on testnet, so a 10s ceiling turned a slow-but-fine
+                // response into "error decoding response body" mid-body.
+                .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client builds with default TLS"),
             clock: Arc::new(ClockOffset::new()),

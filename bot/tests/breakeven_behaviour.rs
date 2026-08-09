@@ -506,3 +506,24 @@ async fn the_timer_still_runs_the_escalation_ladder() {
         "a stop observed past its trigger must still start the escalation ladder"
     );
 }
+
+#[tokio::test]
+async fn the_escalation_ladder_does_not_fetch_tickers_with_nothing_to_escalate() {
+    // /v5/market/tickers returns every linear symbol (812 on testnet, 4.5-10s
+    // against what was a 10s timeout). Fetching it with no protected position
+    // is pure waste, and a timeout on it aborted the whole escalation pass —
+    // 20 such failures in one 15-minute soak that held no positions at all.
+    let mock = Arc::new(MockExchange::new());
+    let (mut engine, _journal, _dir) = loop_with(Arc::clone(&mock)).await;
+
+    engine
+        .drive_stop_escalation(0)
+        .await
+        .expect("escalation pass");
+
+    assert_eq!(
+        mock.tickers_call_count(),
+        0,
+        "no open position means nothing to measure a trigger against"
+    );
+}

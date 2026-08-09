@@ -29,6 +29,7 @@ struct Recorded {
     cancelled: Vec<String>,
     amended: Vec<(Symbol, Decimal, Decimal)>,
     place_entry_calls: usize,
+    tickers_calls: usize,
 }
 
 /// Programmable failure for an injected endpoint.
@@ -167,6 +168,15 @@ impl MockExchange {
     pub fn place_entry_call_count(&self) -> usize {
         self.recorded.lock().expect("mock lock").place_entry_calls
     }
+
+    /// How many times `tickers()` was fetched.
+    ///
+    /// `/v5/market/tickers` returns every linear symbol — 812 on testnet, and
+    /// measured at 4.5-10s against a 10s client timeout — so fetching it when
+    /// there is nothing to measure is the most expensive no-op in the loop.
+    pub fn tickers_call_count(&self) -> usize {
+        self.recorded.lock().expect("mock lock").tickers_calls
+    }
 }
 
 #[async_trait]
@@ -176,6 +186,7 @@ impl ExchangeClient for MockExchange {
     }
 
     async fn tickers(&self) -> Result<Vec<Ticker>, ExchangeError> {
+        self.recorded.lock().expect("mock lock").tickers_calls += 1;
         Ok(self.tickers.clone())
     }
 
