@@ -56,6 +56,19 @@ pub const MIGRATIONS: &[&str] = &[
         moved_to_breakeven INTEGER NOT NULL,
         updated_at_ms      INTEGER NOT NULL
     )",
+    // Append-only audit log: one row per lifecycle event, never updated and
+    // never deleted. `at_ms` is INTEGER, so ordering it in SQL is safe — it is
+    // a timestamp, not a Decimal.
+    "CREATE TABLE IF NOT EXISTS trade_events (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        at_ms         INTEGER NOT NULL,
+        symbol        TEXT NOT NULL,
+        order_link_id TEXT,
+        kind          TEXT NOT NULL,
+        detail        TEXT NOT NULL,
+        config_hash   TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_trade_events_symbol ON trade_events(symbol, at_ms)",
     "CREATE TABLE IF NOT EXISTS candles (
         symbol       TEXT NOT NULL,
         timeframe    TEXT NOT NULL,

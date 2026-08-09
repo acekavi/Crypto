@@ -81,6 +81,98 @@ pub struct ProtectionRecord {
     pub updated_at_ms: i64,
 }
 
+/// What happened to a trade. One variant per event the audit log records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeEventKind {
+    EntryPlaced,
+    EntryFilled,
+    EntryExpired,
+    EntryCancelled,
+    StopPlaced,
+    StopMovedToBreakeven,
+    /// The exchange rejected a stop amend; the in-memory state did not change,
+    /// so the engine retries next tick.
+    StopAmendFailed,
+    StopEscalated,
+    StopLadderExhausted,
+    PositionClosed,
+    /// A protection adopted from the journal at startup, so the audit trail
+    /// shows the restart.
+    ProtectionRestored,
+    HaltSet,
+    HaltCleared,
+}
+
+impl TradeEventKind {
+    /// Every variant. Iterated by the round-trip test, so a variant added
+    /// without being listed here is caught rather than silently unparseable.
+    pub const ALL: [TradeEventKind; 13] = [
+        TradeEventKind::EntryPlaced,
+        TradeEventKind::EntryFilled,
+        TradeEventKind::EntryExpired,
+        TradeEventKind::EntryCancelled,
+        TradeEventKind::StopPlaced,
+        TradeEventKind::StopMovedToBreakeven,
+        TradeEventKind::StopAmendFailed,
+        TradeEventKind::StopEscalated,
+        TradeEventKind::StopLadderExhausted,
+        TradeEventKind::PositionClosed,
+        TradeEventKind::ProtectionRestored,
+        TradeEventKind::HaltSet,
+        TradeEventKind::HaltCleared,
+    ];
+
+    /// The stored form. Stable: it is written into rows that are never
+    /// rewritten, so renaming one would orphan every event already logged.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TradeEventKind::EntryPlaced => "EntryPlaced",
+            TradeEventKind::EntryFilled => "EntryFilled",
+            TradeEventKind::EntryExpired => "EntryExpired",
+            TradeEventKind::EntryCancelled => "EntryCancelled",
+            TradeEventKind::StopPlaced => "StopPlaced",
+            TradeEventKind::StopMovedToBreakeven => "StopMovedToBreakeven",
+            TradeEventKind::StopAmendFailed => "StopAmendFailed",
+            TradeEventKind::StopEscalated => "StopEscalated",
+            TradeEventKind::StopLadderExhausted => "StopLadderExhausted",
+            TradeEventKind::PositionClosed => "PositionClosed",
+            TradeEventKind::ProtectionRestored => "ProtectionRestored",
+            TradeEventKind::HaltSet => "HaltSet",
+            TradeEventKind::HaltCleared => "HaltCleared",
+        }
+    }
+}
+
+/// Parsing is `FromStr` rather than an inherent `from_str` so it composes with
+/// `str::parse`; the error is a `JournalError::Decode` because the only thing
+/// that ever parses one of these is a row coming back out of the log.
+impl std::str::FromStr for TradeEventKind {
+    type Err = JournalError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        TradeEventKind::ALL
+            .into_iter()
+            .find(|k| k.as_str() == s)
+            .ok_or_else(|| JournalError::Decode(format!("unknown trade event kind {s}")))
+    }
+}
+
+/// One row of `trade_events`. Append-only: written once, never updated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradeEvent {
+    pub at_ms: i64,
+    pub symbol: Symbol,
+    /// `None` for events that are not about one order, such as a halt.
+    pub order_link_id: Option<String>,
+    pub kind: TradeEventKind,
+    /// Free text for humans, e.g. `"stop 61234.5 -> 62000.0 (entry)"`. Never
+    /// parsed back — anything a machine needs belongs in its own column.
+    pub detail: String,
+    /// SHA-256 of the effective config, so every event is attributable to an
+    /// exact ruleset.
+    pub config_hash: String,
+}
+
 fn state_str(s: OrderState) -> &'static str {
     match s {
         OrderState::New => "New",
@@ -451,6 +543,77 @@ impl Journal {
             });
         }
         Ok(out)
+    }
+
+    /// Append one lifecycle event. Never idempotent: two identical events
+    /// really did happen twice, and the log's job is to say so.
+    pub async fn record_event(&self, e: &TradeEvent) -> Result<(), JournalError> {
+        self.conn
+            .execute(
+                "INSERT INTO trade_events
+                 (at_ms, symbol, order_link_id, kind, detail, config_hash)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                (
+                    e.at_ms,
+                    e.symbol.as_str().to_string(),
+                    e.order_link_id.clone(),
+                    e.kind.as_str().to_string(),
+                    e.detail.clone(),
+                    e.config_hash.clone(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// One symbol's events, oldest first.
+    ///
+    /// Ordered by `at_ms` then `id`: both are INTEGER, so SQL compares them
+    /// numerically, and the `id` tiebreak keeps insertion order for events
+    /// written within the same millisecond.
+    pub async fn events_for(&self, symbol: &Symbol) -> Result<Vec<TradeEvent>, JournalError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT at_ms, symbol, order_link_id, kind, detail, config_hash
+                 FROM trade_events WHERE symbol = ?1 ORDER BY at_ms ASC, id ASC",
+                (symbol.as_str().to_string(),),
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let get_text = |i: usize| -> Result<String, JournalError> {
+                row.get_value(i)
+                    .map_err(|e| JournalError::Db(e.to_string()))?
+                    .as_text()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| JournalError::Decode(format!("column {i} is not text")))
+            };
+
+            out.push(TradeEvent {
+                at_ms: row
+                    .get_value(0)
+                    .map_err(|e| JournalError::Db(e.to_string()))?
+                    .as_integer()
+                    .copied()
+                    .ok_or_else(|| JournalError::Decode("at_ms is not an integer".into()))?,
+                symbol: Symbol::new(get_text(1)?),
+                order_link_id: row
+                    .get_value(2)
+                    .ok()
+                    .and_then(|v| v.as_text().map(|s| s.to_string())),
+                kind: get_text(3)?.parse()?,
+                detail: get_text(4)?,
+                config_hash: get_text(5)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn event_count(&self) -> Result<i64, JournalError> {
+        self.scalar_i64("SELECT COUNT(*) FROM trade_events", ())
+            .await
     }
 
     pub async fn record_equity(&self, equity: Decimal, at_ms: i64) -> Result<(), JournalError> {
