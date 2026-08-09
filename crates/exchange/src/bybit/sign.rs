@@ -89,9 +89,22 @@ impl ClockOffset {
     }
 
     /// Record an observation of the server clock against our own.
-    pub fn observe(&self, server_time_ms: i64, local_time_ms: i64) {
+    ///
+    /// The local reference is the **midpoint of the round trip**, the standard
+    /// NTP estimate: the server stamped `server_time_ms` somewhere between the
+    /// request leaving and the response arriving, and the midpoint is the
+    /// unbiased guess at when.
+    ///
+    /// Measuring against the moment the response finished instead makes the
+    /// offset understate true drift by roughly the whole round-trip time, so on
+    /// a slow link the bot signs requests with a timestamp the server has
+    /// already moved past. Observed on testnet: `retCode 10002` with an 8s
+    /// req/server gap against a 5s `recv_window`, while the machine's actual
+    /// clock error was under a second.
+    pub fn observe_round_trip(&self, server_time_ms: i64, sent_at_ms: i64, received_at_ms: i64) {
+        let midpoint = sent_at_ms + (received_at_ms - sent_at_ms) / 2;
         self.offset_ms
-            .store(server_time_ms - local_time_ms, Ordering::Relaxed);
+            .store(server_time_ms - midpoint, Ordering::Relaxed);
     }
 
     pub fn offset_ms(&self) -> i64 {
@@ -175,7 +188,7 @@ mod tests {
     fn clock_offset_corrects_local_drift() {
         let clock = ClockOffset::new();
         // Server is 3 seconds ahead of our local clock.
-        clock.observe(1_700_000_003_000, 1_700_000_000_000);
+        clock.observe_round_trip(1_700_000_003_000, 1_700_000_000_000, 1_700_000_000_000);
         assert_eq!(clock.offset_ms(), 3_000);
     }
 
@@ -183,5 +196,47 @@ mod tests {
     fn clock_offset_defaults_to_zero_before_any_observation() {
         let clock = ClockOffset::new();
         assert_eq!(clock.offset_ms(), 0);
+    }
+}
+
+#[cfg(test)]
+mod clock_offset_tests {
+    use super::*;
+
+    #[test]
+    fn the_offset_is_measured_from_the_round_trips_midpoint() {
+        // Sent at 1000, response back at 3000, server stamped 2500. The server
+        // stamp corresponds to local ~2000, so the true offset is +500.
+        let clock = ClockOffset::new();
+        clock.observe_round_trip(2500, 1000, 3000);
+        assert_eq!(clock.offset_ms(), 500);
+    }
+
+    #[test]
+    fn a_slow_round_trip_does_not_bias_the_offset_toward_zero() {
+        // Same real drift (+500) but a 10s round trip. Measuring against the
+        // response instant would have yielded 500 - 10000 = -9500, and the bot
+        // would sign with a timestamp ~10s stale — retCode 10002 territory.
+        let clock = ClockOffset::new();
+        clock.observe_round_trip(6_500, 1_000, 11_000);
+        assert_eq!(
+            clock.offset_ms(),
+            500,
+            "latency must cancel, not accumulate"
+        );
+    }
+
+    #[test]
+    fn an_instant_round_trip_reports_the_raw_difference() {
+        let clock = ClockOffset::new();
+        clock.observe_round_trip(1_700_000_005_000, 1_700_000_000_000, 1_700_000_000_000);
+        assert_eq!(clock.offset_ms(), 5_000);
+    }
+
+    #[test]
+    fn a_local_clock_ahead_of_the_server_gives_a_negative_offset() {
+        let clock = ClockOffset::new();
+        clock.observe_round_trip(1_000, 3_000, 5_000);
+        assert_eq!(clock.offset_ms(), -3_000);
     }
 }

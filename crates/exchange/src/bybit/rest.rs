@@ -116,6 +116,7 @@ impl BybitRest {
             );
             let url = format!("{}{}?{}", self.base_url, path, query);
 
+            let sent_at = local_now_ms();
             let resp = self
                 .http
                 .get(&url)
@@ -129,7 +130,8 @@ impl BybitRest {
             let text = resp.text().await?;
             let env: Envelope<T> = serde_json::from_str(&text)
                 .map_err(|e| ExchangeError::Decode(format!("{e}: {text}")))?;
-            self.clock.observe(env.time, local_now_ms());
+            self.clock
+                .observe_round_trip(env.time, sent_at, local_now_ms());
             env.into_result()
         })
         .await
@@ -160,6 +162,7 @@ impl BybitRest {
                 );
                 let url = format!("{}{}", self.base_url, path);
 
+                let sent_at = local_now_ms();
                 let resp = self
                     .http
                     .post(&url)
@@ -175,7 +178,8 @@ impl BybitRest {
                 let text = resp.text().await?;
                 let env: Envelope<T> = serde_json::from_str(&text)
                     .map_err(|e| ExchangeError::Decode(format!("{e}: {text}")))?;
-                self.clock.observe(env.time, local_now_ms());
+                self.clock
+                    .observe_round_trip(env.time, sent_at, local_now_ms());
                 env.into_result()
             }
         })
