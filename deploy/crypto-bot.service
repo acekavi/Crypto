@@ -1,0 +1,48 @@
+# Crypto trading bot — Bybit TESTNET, ICT liquidity_sweep_v2.
+#
+# Install as a user service (no root needed):
+#
+#   cargo build -p bot --release --bin crypto-bot
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/crypto-bot.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now crypto-bot
+#
+# A user service only runs while you are logged in unless lingering is on.
+# A 24/7 bot needs it, so it survives logout and starts at boot:
+#
+#   loginctl enable-linger $USER
+#
+# Watch it:   journalctl --user -u crypto-bot -f
+# Stop it:    systemctl --user stop crypto-bot
+# Disable:    systemctl --user disable --now crypto-bot
+
+[Unit]
+Description=Crypto trading bot (Bybit testnet, ICT liquidity_sweep_v2)
+Documentation=file:///var/home/acekavi/Projects/Crypto/docs/strategies/ict-liquidity-sweep-v2.md
+After=network-online.target
+Wants=network-online.target
+# Never stop retrying. The default start-limit would give up after a handful
+# of rapid failures and leave open positions unmanaged, which is the failure
+# this service exists to prevent.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/var/home/acekavi/Projects/Crypto
+# Reads BYBIT_API_KEY / BYBIT_API_SECRET, and TURSO_* when configured.
+# Keep this file mode 600 — it holds API credentials.
+EnvironmentFile=/var/home/acekavi/Projects/Crypto/.env
+# Belt and braces on top of the hard-coded `testnet` argument below: even if
+# the variable is ever added to .env, this service can never select mainnet.
+UnsetEnvironment=BYBIT_ALLOW_MAINNET
+ExecStart=/var/home/acekavi/Projects/Crypto/target/release/crypto-bot testnet
+Restart=always
+RestartSec=10s
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crypto-bot
+
+[Install]
+WantedBy=default.target
