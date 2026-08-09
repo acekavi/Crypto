@@ -659,7 +659,14 @@ fn startup_restores_protections_after_reconciling_and_before_the_loop() {
     let reconcile = line_of("reconcile(").expect("main.rs must reconcile against the exchange");
     let restore = line_of("restore_protections(")
         .expect("main.rs must restore stop protections at startup, or a restart orphans the trade");
-    let event_loop = line_of("loop {").expect("main.rs must run an event loop");
+    // The FIRST `loop {` in the file is not necessarily the event loop —
+    // helper functions above `main` may have their own (the startup retry
+    // does). Anchor on the one that follows reconciliation.
+    let event_loop = code
+        .iter()
+        .find(|(i, line)| *i > reconcile && line.contains("loop {"))
+        .map(|(i, _)| *i)
+        .expect("main.rs must run an event loop after reconciling");
 
     assert!(
         restore > reconcile,

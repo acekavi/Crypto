@@ -48,6 +48,58 @@ fn build_subscriptions(symbols: &[Symbol], timeframes: &[Timeframe]) -> Vec<Subs
         .collect()
 }
 
+/// Retry a startup step patiently, with capped exponential backoff.
+///
+/// The shared REST retry budget is deliberately short — five attempts over
+/// roughly six seconds — because it also covers order placement, where waiting
+/// a minute is worse than failing. Startup is the opposite: nothing is time
+/// sensitive, and a transient blip must not leave the bot dead. A testnet run
+/// exited on `RetriesExhausted` fetching instrument metadata after four
+/// connection errors, on a link that was fine again seconds later.
+///
+/// That matters most when positions are open: an exited bot manages no stops.
+/// Supervision (systemd `Restart=always`) is still worth having — this only
+/// removes the need for it to fire on a few seconds of packet loss.
+async fn with_startup_retry<T, F, Fut>(
+    label: &str,
+    mut op: F,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, exchange::bybit::transport::ExchangeError>>,
+{
+    const MAX_ELAPSED: Duration = Duration::from_secs(300);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+    let started = std::time::Instant::now();
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                // A non-retryable error is a real misconfiguration — bad
+                // credentials, a rejected request — and repeating it just
+                // delays a failure the operator has to fix anyway.
+                if e.class() != ErrorClass::Retryable {
+                    return Err(Box::new(e));
+                }
+                if started.elapsed() >= MAX_ELAPSED {
+                    error!(step = label, "startup step still failing; giving up");
+                    return Err(Box::new(e));
+                }
+                warn!(
+                    step = label,
+                    error = %e,
+                    retry_in_secs = backoff.as_secs(),
+                    "startup step failed; retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -76,12 +128,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rest = Arc::new(BybitRest::new(profile.rest_base_url().to_string(), creds));
 
     // 1. Authenticate.
-    let balance = rest.balance().await?;
+    let balance = with_startup_retry("balance", || rest.balance()).await?;
     info!(equity = %balance.equity, available = %balance.available, "authenticated");
 
     // 2. Load instrument metadata; every order and every universe filter
     //    needs tick size, quantity step and listing age.
-    let instruments = rest.instruments().await?;
+    let instruments = with_startup_retry("instruments", || rest.instruments()).await?;
     info!(count = instruments.len(), "loaded tradable instruments");
 
     // turso::Builder::new_local expects the parent directory to already
