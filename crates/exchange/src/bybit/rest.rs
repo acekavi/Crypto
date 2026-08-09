@@ -35,6 +35,22 @@ const KLINE_PAGE_LIMIT: u16 = 1000;
 // rather than assumed per the plan's instruction not to guess.
 const FUNDING_PAGE_LIMIT: u16 = 200;
 
+/// Drop the candle that is still forming.
+///
+/// Bybit's kline REST returns the in-progress candle as its newest row and
+/// gives no `confirm` flag to identify it — that exists only on the WebSocket
+/// feed. Keeping it does two kinds of damage: a partial bar's OHLC is fed to
+/// the strategy's indicators during warm-up, and its open time is recorded in
+/// the `CandleStore`, so the same candle's real close arrives over the feed and
+/// is rejected as a duplicate.
+///
+/// A candle is closed once its whole span is in the past, measured against the
+/// clock-corrected server time rather than the local clock.
+pub fn drop_unclosed(tf: Timeframe, now_ms: i64, mut candles: Vec<Candle>) -> Vec<Candle> {
+    candles.retain(|c| c.open_time_ms + tf.duration_ms() <= now_ms);
+    candles
+}
+
 /// Bybit V5 REST client.
 ///
 /// Every response updates the clock offset, so signing stays valid even on a
@@ -243,6 +259,7 @@ impl BybitRest {
             }
         })
         .await
+        .map(|c| drop_unclosed(tf, self.clock.now_ms(), c))
     }
 
     /// Fetches every funding-rate print in `[start_ms, end_ms]`, paging
@@ -461,7 +478,7 @@ impl ExchangeClient for BybitRest {
             .map(|r| r.into_candle())
             .collect::<Result<_, _>>()?;
         candles.sort_by_key(|c| c.open_time_ms);
-        Ok(candles)
+        Ok(drop_unclosed(tf, self.clock.now_ms(), candles))
     }
 
     /// Place a PostOnly limit entry with stop and target attached.
