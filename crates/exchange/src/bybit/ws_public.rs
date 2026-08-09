@@ -32,13 +32,12 @@ struct KlineData {
 }
 
 fn interval_to_timeframe(interval: &str) -> Result<Timeframe, ExchangeError> {
-    match interval {
-        "60" => Ok(Timeframe::H1),
-        "240" => Ok(Timeframe::H4),
-        other => Err(ExchangeError::Decode(format!(
-            "unsupported kline interval {other}"
-        ))),
-    }
+    // Delegates to the inverse of `as_bybit_interval` rather than repeating
+    // the mapping. The local copy handled only "60" and "240", so every M15
+    // and D1 message this bot subscribes to failed to decode and the feed
+    // reconnect-looped without ever delivering a candle.
+    Timeframe::from_bybit_interval(interval)
+        .ok_or_else(|| ExchangeError::Decode(format!("unsupported kline interval {interval}")))
 }
 
 /// Parse one WebSocket text frame.

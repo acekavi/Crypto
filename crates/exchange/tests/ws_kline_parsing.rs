@@ -75,11 +75,32 @@ fn non_kline_frames_are_ignored_not_errors() {
 
 #[test]
 fn unknown_interval_in_topic_is_an_error() {
-    let raw = r#"{"topic":"kline.5.BTCUSDT","type":"snapshot","ts":1,"data":[]}"#;
+    // "30" is a real Bybit interval with no `Timeframe` variant, so it is
+    // genuinely unsupported. This test previously used "5" — which IS a
+    // variant (M5) — and so asserted the parser gap rather than catching it.
+    let raw = r#"{"topic":"kline.30.BTCUSDT","type":"snapshot","ts":1,"data":[]}"#;
     assert!(
         parse_kline_message(raw).is_err(),
         "unsupported interval must not be silently dropped"
     );
+}
+
+#[test]
+fn every_timeframe_the_bot_subscribes_to_can_be_parsed_back() {
+    // The parser handled only "60" and "240" while the live bot subscribed to
+    // M15, H4 and D1, so two of its three feeds reconnect-looped without ever
+    // delivering a candle. Driving this from Timeframe::ALL means a variant
+    // added later cannot quietly go unparsed.
+    for tf in Timeframe::ALL {
+        let raw = format!(
+            r#"{{"topic":"kline.{}.BTCUSDT","type":"snapshot","ts":1,"data":[]}}"#,
+            tf.as_bybit_interval()
+        );
+        assert!(
+            parse_kline_message(&raw).is_ok(),
+            "{tf:?} is subscribable but not parseable"
+        );
+    }
 }
 
 use exchange::bybit::ws_public::missing_candle_count;

@@ -17,6 +17,18 @@ pub enum Timeframe {
 }
 
 impl Timeframe {
+    /// Every variant, so a round-trip test cannot silently miss one added
+    /// later. The WS feed shipped parsing only H1 and H4 while the bot
+    /// subscribed to M15 and D1, and every message for those two failed to
+    /// decode — a bug no unit test caught because nothing enumerated the enum.
+    pub const ALL: [Timeframe; 5] = [
+        Timeframe::M5,
+        Timeframe::M15,
+        Timeframe::H1,
+        Timeframe::H4,
+        Timeframe::D1,
+    ];
+
     /// Bybit V5 kline interval string, used in both REST params and WS topics.
     pub fn as_bybit_interval(self) -> &'static str {
         match self {
@@ -26,6 +38,17 @@ impl Timeframe {
             Timeframe::H4 => "240",
             Timeframe::D1 => "D",
         }
+    }
+
+    /// The exact inverse of [`Timeframe::as_bybit_interval`].
+    ///
+    /// Lives here rather than beside the WebSocket parser so the two
+    /// directions sit together and a new variant cannot be added to one
+    /// without the other going non-exhaustive.
+    pub fn from_bybit_interval(interval: &str) -> Option<Timeframe> {
+        Timeframe::ALL
+            .into_iter()
+            .find(|tf| tf.as_bybit_interval() == interval)
     }
 
     pub fn duration_ms(self) -> i64 {
@@ -89,5 +112,39 @@ mod tests {
             c.close_time_ms(Timeframe::H1),
             1_700_000_000_000 + 3_600_000 - 1
         );
+    }
+}
+
+#[cfg(test)]
+mod timeframe_tests {
+    use super::*;
+
+    #[test]
+    fn every_timeframe_round_trips_through_its_bybit_interval() {
+        // The WS feed parsed only H1 and H4 while the bot subscribed to M15
+        // and D1; enumerating ALL is what makes that unrepresentable.
+        for tf in Timeframe::ALL {
+            assert_eq!(
+                Timeframe::from_bybit_interval(tf.as_bybit_interval()),
+                Some(tf),
+                "{tf:?} does not round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_timeframes_share_a_bybit_interval() {
+        for (i, a) in Timeframe::ALL.iter().enumerate() {
+            for b in &Timeframe::ALL[i + 1..] {
+                assert_ne!(a.as_bybit_interval(), b.as_bybit_interval());
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_interval_is_rejected_rather_than_defaulted() {
+        assert_eq!(Timeframe::from_bybit_interval("30"), None);
+        assert_eq!(Timeframe::from_bybit_interval("W"), None);
+        assert_eq!(Timeframe::from_bybit_interval(""), None);
     }
 }
