@@ -585,9 +585,14 @@ impl Strategy for IctStrategy {
     }
 
     fn warmup_candles(&self) -> usize {
-        // The daily bias EMA is the binding constraint, with margin so the
-        // smoothed value is meaningful rather than merely defined.
-        self.params.bias_ema + 50
+        // The daily bias EMA is the binding constraint, and 250 is what every
+        // validated backtest ran with — `run_backtest` warms on
+        // `cfg.warmup_candles.max(strategy_warmup)`, and each diagnostic sets
+        // 250. Deriving this from `bias_ema` instead gave 100, so a live bot
+        // warmed on 150 fewer daily candles than the numbers it trades on were
+        // measured with. Fixed rather than derived precisely because it is a
+        // record of what was measured, not of what the EMA alone needs.
+        250
     }
 
     fn on_candle_close(&mut self, ctx: &MarketContext) -> Option<Signal> {

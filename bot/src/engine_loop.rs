@@ -261,25 +261,63 @@ impl EngineLoop {
         }
     }
 
-    /// One position-management pass, and the only thing the live loop's timer
-    /// arm calls.
+    /// The timeframe the strategy signals and executes on: the finest it
+    /// declares.
     ///
-    /// Breakeven runs BEFORE escalation, deliberately: a stop that has just
-    /// been pulled to entry and immediately triggered must escalate from its
-    /// new trigger, not the one it was placed at. Running escalation first
-    /// would spend a tick measuring against a trigger that no longer exists.
-    ///
-    /// This exists as a seam rather than two calls in `main.rs` so a test can
-    /// prove the tick actually drives both. Twice now this codebase has
-    /// shipped a pass that was implemented, unit-tested and never invoked —
-    /// the escalation ladder (`299bf40`) and the drawdown halt (`3a725d5`).
-    pub async fn drive_position_management(&mut self, now_ms: i64) -> Result<(), ExchangeError> {
-        self.drive_breakeven_stops().await?;
-        self.drive_stop_escalation(now_ms).await
+    /// Derived rather than named, exactly as `run_backtest` derives its
+    /// `finest` and `main.rs` derives its entry-expiry timeframe. Hard-coding
+    /// M15 here would silently stop matching the moment a variant executes on
+    /// M5.
+    fn execution_timeframe(&self) -> Option<Timeframe> {
+        self.strategy
+            .timeframes()
+            .iter()
+            .copied()
+            .min_by_key(|tf| tf.duration_ms())
     }
 
-    /// Pull the stop to entry on every open position that has travelled its
-    /// strategy's breakeven multiple in favour.
+    /// One closed candle, start to finish — the single seam `main.rs`'s candle
+    /// arm calls.
+    ///
+    /// Breakeven runs BEFORE the strategy is evaluated, mirroring
+    /// `run_backtest`, where `SimulatedExchange::advance` (which applies the
+    /// breakeven rule) is called on the tick ahead of `on_candle_closed`. An
+    /// entry placed off this candle must not be able to affect the stop of the
+    /// position that was already open when it closed.
+    ///
+    /// This exists as a seam rather than two calls in `main.rs` so a test can
+    /// prove the candle arm actually drives both. Twice now this codebase has
+    /// shipped a pass that was implemented, unit-tested and never invoked —
+    /// the escalation ladder (`299bf40`) and the drawdown halt (`3a725d5`).
+    ///
+    /// A breakeven failure must not cost the strategy this candle: dropping it
+    /// would leave `CandleStore` seeing a gap at the next one. So anything but
+    /// a `Fatal` error is logged and the candle still processed, matching how
+    /// `on_candle_closed` itself treats a failed cancel.
+    ///
+    /// `run_backtest` deliberately does NOT call this — it calls
+    /// `on_candle_closed` directly, because `SimulatedExchange::advance`
+    /// already applies the identical breakeven rule to its own position record
+    /// on the same candle. Driving both would apply it twice, and the
+    /// simulator's version rests the stop at entry exactly while a real
+    /// stop-limit's fill price sits an offset beyond its trigger.
+    pub async fn drive_candle_close(
+        &mut self,
+        symbol: &Symbol,
+        tf: Timeframe,
+        candle: &Candle,
+    ) -> Result<CandleOutcome, ExchangeError> {
+        if let Err(e) = self.drive_breakeven_stops(symbol, tf, candle).await {
+            if e.class() == ErrorClass::Fatal {
+                return Err(e);
+            }
+            warn!(%symbol, error = %e, "the breakeven pass failed for this candle");
+        }
+        self.on_candle_closed(symbol, tf, candle).await
+    }
+
+    /// Pull `symbol`'s stop to entry if the candle that just closed travelled
+    /// its strategy's breakeven multiple in favour.
     ///
     /// This is the live counterpart of the rule the simulator applies in
     /// `SimulatedExchange::advance`. Without it the live bot trades the
@@ -287,86 +325,102 @@ impl EngineLoop {
     /// 21.3% max drawdown, which breaches the 20% total-drawdown halt, so the
     /// bot would halt itself.
     ///
-    /// Distance travelled is measured from the ticker's last price, the same
-    /// source `drive_stop_escalation` uses, against `initial_risk` fixed at
-    /// placement. Note this samples price rather than watching a high-water
-    /// mark: the simulator tests `candle.high`, so a spike through the
-    /// threshold that fully retraces between two ticks moves the stop in a
-    /// backtest and does not move it live.
+    /// Distance travelled is measured against the CLOSED CANDLE's extreme —
+    /// `high` for a long, `low` for a short — against `initial_risk` fixed at
+    /// placement, which is precisely what the simulator reads. This used to
+    /// sample the ticker's last price on the escalation timer, and a wick that
+    /// crossed the threshold and retraced between two polls therefore moved
+    /// the stop in a backtest and not live. A closed candle records that wick
+    /// exactly, so the two now agree by construction.
+    ///
+    /// Only the execution timeframe drives it, for the same reason
+    /// `run_backtest` settles only on `finest`: a structure candle spans price
+    /// action the execution candles already covered.
     ///
     /// The amend is a plain amend of the resting stop-limit — never a market
-    /// order — and one symbol failing must not stop the rest being evaluated,
-    /// so nothing in the per-position loop uses `?`.
-    pub async fn drive_breakeven_stops(&mut self) -> Result<(), ExchangeError> {
+    /// order — and a failure is logged rather than returned, so one symbol's
+    /// bad amend cannot abort the candle it arrived on.
+    pub async fn drive_breakeven_stops(
+        &mut self,
+        symbol: &Symbol,
+        tf: Timeframe,
+        candle: &Candle,
+    ) -> Result<(), ExchangeError> {
+        if self.execution_timeframe() != Some(tf) {
+            return Ok(());
+        }
+
+        let Some(protection) = self.protections.get(symbol) else {
+            return Ok(());
+        };
+        // No threshold means the strategy did not ask for a breakeven stop,
+        // and this pass has no opinion of its own.
+        let Some(threshold) = protection.breakeven_at_r else {
+            return Ok(());
+        };
+        if protection.moved_to_breakeven || protection.initial_risk <= Decimal::ZERO {
+            return Ok(());
+        }
+
+        let side = protection.side;
+        let entry_price = protection.entry_price;
+        let travelled = match side {
+            Side::Buy => candle.high - entry_price,
+            Side::Sell => entry_price - candle.low,
+        };
+        if travelled < protection.initial_risk * threshold {
+            return Ok(());
+        }
+
+        // Beyond the trigger, on the side price is moving through it: a long's
+        // stop sells to close on the way down, so its limit sits below; a
+        // short's sits above.
+        let limit_price = match side {
+            Side::Buy => entry_price - protection.stop_limit_offset,
+            Side::Sell => entry_price + protection.stop_limit_offset,
+        };
+
+        // Last, because it is the only step that costs a round trip: a
+        // protection whose position has already closed still sits in the map
+        // until the escalation ladder prunes it, and amending its stop would
+        // be rejected. The simulator has the same guard implicitly — it
+        // applies breakeven only to a position still in `positions` after the
+        // candle's exits resolved.
         let positions = self.client.positions().await?;
-        let tickers = self.client.tickers().await?;
-        let last_price: HashMap<&str, Decimal> = tickers
+        if !positions
             .iter()
-            .map(|t| (t.symbol.as_str(), t.last_price))
-            .collect();
+            .any(|p| p.symbol.as_str() == symbol.as_str())
+        {
+            return Ok(());
+        }
 
-        for position in &positions {
-            let Some(protection) = self.protections.get(&position.symbol) else {
-                continue;
-            };
-            // No threshold means the strategy did not ask for a breakeven
-            // stop, and this pass has no opinion of its own.
-            let Some(threshold) = protection.breakeven_at_r else {
-                continue;
-            };
-            if protection.moved_to_breakeven || protection.initial_risk <= Decimal::ZERO {
-                continue;
-            }
-            let Some(&price) = last_price.get(position.symbol.as_str()) else {
-                continue;
-            };
-
-            let side = protection.side;
-            let entry_price = protection.entry_price;
-            let travelled = match side {
-                Side::Buy => price - entry_price,
-                Side::Sell => entry_price - price,
-            };
-            if travelled < protection.initial_risk * threshold {
-                continue;
-            }
-
-            // Beyond the trigger, on the side price is moving through it: a
-            // long's stop sells to close on the way down, so its limit sits
-            // below; a short's sits above.
-            let limit_price = match side {
-                Side::Buy => entry_price - protection.stop_limit_offset,
-                Side::Sell => entry_price + protection.stop_limit_offset,
-            };
-
-            match self
-                .client
-                .amend_stop(&position.symbol, entry_price, limit_price)
-                .await
-            {
-                Ok(()) => {
-                    // Only now. A failed amend leaves the flag clear so the
-                    // next tick retries rather than silently skipping.
-                    if let Some(entry) = self.protections.get_mut(&position.symbol) {
-                        entry.moved_to_breakeven = true;
-                        // The stop now rests at entry, so the escalation
-                        // ladder must measure from there.
-                        entry.trigger = entry_price;
-                    }
-                    info!(
-                        symbol = %position.symbol,
-                        trigger = %entry_price,
-                        %limit_price,
-                        "stop moved to entry; the trade can no longer lose"
-                    );
+        match self
+            .client
+            .amend_stop(symbol, entry_price, limit_price)
+            .await
+        {
+            Ok(()) => {
+                // Only now. A failed amend leaves the flag clear so the next
+                // candle retries rather than silently skipping.
+                if let Some(entry) = self.protections.get_mut(symbol) {
+                    entry.moved_to_breakeven = true;
+                    // The stop now rests at entry, so the escalation ladder
+                    // must measure from there.
+                    entry.trigger = entry_price;
                 }
-                Err(e) => {
-                    warn!(
-                        symbol = %position.symbol,
-                        error = %e,
-                        "moving the stop to entry failed; retrying next tick"
-                    );
-                }
+                info!(
+                    %symbol,
+                    trigger = %entry_price,
+                    %limit_price,
+                    "stop moved to entry; the trade can no longer lose"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    %symbol,
+                    error = %e,
+                    "moving the stop to entry failed; retrying next candle"
+                );
             }
         }
 

@@ -375,7 +375,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             event = rx.recv() => match event {
                 Ok(MarketEvent::CandleClosed { symbol, tf, candle }) => {
-                    match engine_loop.on_candle_closed(&symbol, tf, &candle).await {
+                    // The seam that drives BOTH per-candle passes — the
+                    // breakeven check against this candle's high/low, then the
+                    // strategy — in the order the backtester applies them; see
+                    // `drive_candle_close`.
+                    match engine_loop.drive_candle_close(&symbol, tf, &candle).await {
                         Ok(outcome) => info!(%symbol, ?tf, ?outcome, "candle processed"),
                         Err(e) => {
                             if e.class() == ErrorClass::Fatal {
@@ -421,20 +425,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             },
             _ = escalation_interval.tick() => {
-                // Drives BOTH position-management passes — breakeven stops,
-                // then the escalation ladder — through the single seam that
-                // fixes their order; see `drive_position_management`.
+                // The ladder alone rides the timer. It reacts to a stop that
+                // has already fired and not filled, which is genuinely time
+                // sensitive — every second it rests unfilled is a position
+                // running unprotected. The breakeven threshold is not: a
+                // closed candle records the extreme it reached exactly, so
+                // that check moved to the candle arm above, where it matches
+                // the backtester.
                 //
-                // Mirrors the candle arm above exactly: Fatal halts the
-                // process, anything else is logged and the loop continues —
-                // one bad tick must not stop the ladder from being driven on
-                // every OTHER open position.
-                if let Err(e) = engine_loop.drive_position_management(rest.clock().now_ms()).await {
+                // Mirrors the candle arm exactly: Fatal halts the process,
+                // anything else is logged and the loop continues — one bad
+                // tick must not stop the ladder from being driven on every
+                // OTHER open position.
+                if let Err(e) = engine_loop.drive_stop_escalation(rest.clock().now_ms()).await {
                     if e.class() == ErrorClass::Fatal {
-                        error!(error = %e, "fatal error driving position management; halting");
+                        error!(error = %e, "fatal error driving the stop escalation ladder; halting");
                         return Err(e.into());
                     }
-                    warn!(error = %e, "driving position management failed");
+                    warn!(error = %e, "driving the stop escalation ladder failed");
                 }
             }
             _ = rerank.tick() => {

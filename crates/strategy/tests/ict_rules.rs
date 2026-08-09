@@ -418,3 +418,16 @@ fn the_consolidated_strategy_carries_exactly_what_survived_measurement() {
     assert_eq!(p.reward_multiple, dec!(3));
     assert_eq!(p.stop_buffer_atr, dec!(0), "stop sits at the swept level");
 }
+
+#[test]
+fn the_declared_warmup_matches_what_the_strategy_was_validated_with() {
+    // `run_backtest` warms on `cfg.warmup_candles.max(strategy_warmup)`, and
+    // every validated run set 250. A live bot declaring 100 would warm on less
+    // history than the numbers were measured with, so the declaration is what
+    // has to carry the 250 — nothing else reaches `main.rs`.
+    use strategy::{Strategy, ict::IctStrategy};
+    assert_eq!(
+        IctStrategy::new(IctParams::liquidity_sweep_v2()).warmup_candles(),
+        250
+    );
+}
