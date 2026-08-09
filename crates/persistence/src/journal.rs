@@ -55,6 +55,32 @@ pub struct OrderRecord {
     pub created_at_ms: i64,
 }
 
+/// One row of `stop_protections`: everything the engine needs to keep managing
+/// an open position's stop, so a restart can rebuild its in-memory map instead
+/// of orphaning the trade.
+///
+/// Keyed by symbol, because the engine holds at most one position per symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectionRecord {
+    pub symbol: Symbol,
+    pub order_link_id: String,
+    pub side: Side,
+    /// The stop's current trigger price — rewritten once the stop has moved to
+    /// breakeven, so the escalation ladder measures from where it now sits.
+    pub trigger: Decimal,
+    pub atr: Decimal,
+    pub entry_price: Decimal,
+    /// Entry to stop-limit distance, fixed when the entry was placed. Moving
+    /// the stop later must not change what 1R meant.
+    pub initial_risk: Decimal,
+    pub stop_limit_offset: Decimal,
+    /// `None` means the stop never moves; `Some(0)` would mean "move it to
+    /// entry immediately", so the two must never collapse into each other.
+    pub breakeven_at_r: Option<Decimal>,
+    pub moved_to_breakeven: bool,
+    pub updated_at_ms: i64,
+}
+
 fn state_str(s: OrderState) -> &'static str {
     match s {
         OrderState::New => "New",
@@ -73,6 +99,14 @@ fn parse_state(s: &str) -> Result<OrderState, JournalError> {
         "Cancelled" => OrderState::Cancelled,
         "Rejected" => OrderState::Rejected,
         other => return Err(JournalError::Decode(format!("unknown order state {other}"))),
+    })
+}
+
+fn parse_side(s: &str) -> Result<Side, JournalError> {
+    Ok(match s {
+        "Buy" => Side::Buy,
+        "Sell" => Side::Sell,
+        other => return Err(JournalError::Decode(format!("unknown side {other}"))),
     })
 }
 
@@ -274,11 +308,7 @@ impl Journal {
                 .ok()
                 .and_then(|v| v.as_text().map(|s| s.to_string())),
             symbol: Symbol::new(get_text(2)?),
-            side: match get_text(3)?.as_str() {
-                "Buy" => Side::Buy,
-                "Sell" => Side::Sell,
-                other => return Err(JournalError::Decode(format!("unknown side {other}"))),
-            },
+            side: parse_side(&get_text(3)?)?,
             price: parse_dec(&get_text(4)?, "price")?,
             qty: parse_dec(&get_text(5)?, "qty")?,
             stop_loss: parse_dec(&get_text(6)?, "stop_loss")?,
@@ -313,6 +343,114 @@ impl Journal {
             (utc_day_start_ms, utc_day_start_ms + 86_400_000),
         )
         .await
+    }
+
+    /// Write a protection, replacing any row already held for that symbol.
+    ///
+    /// Called on every mutation of the engine's in-memory map, so the table is
+    /// authoritative at all times rather than a periodic snapshot.
+    pub async fn upsert_protection(&self, p: &ProtectionRecord) -> Result<(), JournalError> {
+        self.conn
+            .execute(
+                "INSERT INTO stop_protections
+                 (symbol, order_link_id, side, trigger, atr, entry_price, initial_risk,
+                  stop_limit_offset, breakeven_at_r, moved_to_breakeven, updated_at_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                 ON CONFLICT(symbol) DO UPDATE SET
+                     order_link_id = excluded.order_link_id,
+                     side = excluded.side,
+                     trigger = excluded.trigger,
+                     atr = excluded.atr,
+                     entry_price = excluded.entry_price,
+                     initial_risk = excluded.initial_risk,
+                     stop_limit_offset = excluded.stop_limit_offset,
+                     breakeven_at_r = excluded.breakeven_at_r,
+                     moved_to_breakeven = excluded.moved_to_breakeven,
+                     updated_at_ms = excluded.updated_at_ms",
+                (
+                    p.symbol.as_str().to_string(),
+                    p.order_link_id.clone(),
+                    p.side.as_bybit().to_string(),
+                    p.trigger.to_string(),
+                    p.atr.to_string(),
+                    p.entry_price.to_string(),
+                    p.initial_risk.to_string(),
+                    p.stop_limit_offset.to_string(),
+                    p.breakeven_at_r.map(|d| d.to_string()),
+                    i64::from(p.moved_to_breakeven),
+                    p.updated_at_ms,
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Drop a symbol's protection — the position is gone.
+    pub async fn delete_protection(&self, symbol: &Symbol) -> Result<(), JournalError> {
+        self.conn
+            .execute(
+                "DELETE FROM stop_protections WHERE symbol = ?1",
+                (symbol.as_str().to_string(),),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Every protection on record, for rebuilding the engine's map at startup.
+    ///
+    /// Unordered on purpose: the caller keys these by symbol, and the Decimal
+    /// columns are TEXT, so no SQL ordering over them would be meaningful.
+    pub async fn load_protections(&self) -> Result<Vec<ProtectionRecord>, JournalError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT symbol, order_link_id, side, trigger, atr, entry_price, initial_risk,
+                        stop_limit_offset, breakeven_at_r, moved_to_breakeven, updated_at_ms
+                 FROM stop_protections",
+                (),
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let get_text = |i: usize| -> Result<String, JournalError> {
+                row.get_value(i)
+                    .map_err(|e| JournalError::Db(e.to_string()))?
+                    .as_text()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| JournalError::Decode(format!("column {i} is not text")))
+            };
+            let get_int = |i: usize, field: &str| -> Result<i64, JournalError> {
+                row.get_value(i)
+                    .map_err(|e| JournalError::Db(e.to_string()))?
+                    .as_integer()
+                    .copied()
+                    .ok_or_else(|| JournalError::Decode(format!("{field} is not an integer")))
+            };
+
+            let breakeven = row
+                .get_value(8)
+                .map_err(|e| JournalError::Db(e.to_string()))?;
+            let breakeven_at_r = match breakeven.as_text() {
+                Some(s) => Some(parse_dec(s, "breakeven_at_r")?),
+                None => None,
+            };
+
+            out.push(ProtectionRecord {
+                symbol: Symbol::new(get_text(0)?),
+                order_link_id: get_text(1)?,
+                side: parse_side(&get_text(2)?)?,
+                trigger: parse_dec(&get_text(3)?, "trigger")?,
+                atr: parse_dec(&get_text(4)?, "atr")?,
+                entry_price: parse_dec(&get_text(5)?, "entry_price")?,
+                initial_risk: parse_dec(&get_text(6)?, "initial_risk")?,
+                stop_limit_offset: parse_dec(&get_text(7)?, "stop_limit_offset")?,
+                breakeven_at_r,
+                moved_to_breakeven: get_int(9, "moved_to_breakeven")? != 0,
+                updated_at_ms: get_int(10, "updated_at_ms")?,
+            });
+        }
+        Ok(out)
     }
 
     pub async fn record_equity(&self, equity: Decimal, at_ms: i64) -> Result<(), JournalError> {

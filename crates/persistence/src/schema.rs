@@ -39,6 +39,23 @@ pub const MIGRATIONS: &[&str] = &[
         reason   TEXT NOT NULL,
         set_at_ms INTEGER NOT NULL
     )",
+    // Mirrors `EngineLoop::protections`, written on every mutation so the
+    // database is authoritative rather than a periodic snapshot. `symbol` is
+    // the primary key because the engine holds at most one position per
+    // symbol, so an upsert on it can never create a duplicate.
+    "CREATE TABLE IF NOT EXISTS stop_protections (
+        symbol             TEXT PRIMARY KEY,
+        order_link_id      TEXT NOT NULL,
+        side               TEXT NOT NULL,
+        trigger            TEXT NOT NULL,
+        atr                TEXT NOT NULL,
+        entry_price        TEXT NOT NULL,
+        initial_risk       TEXT NOT NULL,
+        stop_limit_offset  TEXT NOT NULL,
+        breakeven_at_r     TEXT,
+        moved_to_breakeven INTEGER NOT NULL,
+        updated_at_ms      INTEGER NOT NULL
+    )",
     "CREATE TABLE IF NOT EXISTS candles (
         symbol       TEXT NOT NULL,
         timeframe    TEXT NOT NULL,
