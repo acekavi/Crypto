@@ -1,0 +1,268 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/ MPL-2.0
+//@version=6
+// ICT Liquidity Sweep v2 — a TradingView translation of IctParams::liquidity_sweep_v2
+// from the Rust bot in this repository.
+//
+// RUN THIS ON A 15-MINUTE CHART. The execution timeframe is M15; structure is
+// read from H4 and bias from D1 + H4 via request.security.
+//
+// Rules, in the order the bot applies them:
+//   1. Bias: D1 close and H4 close must BOTH sit on the same side of their
+//      50 EMA. Disagreement means no trade — there is no partial-alignment tier.
+//   2. Liquidity sweep on a closed H4 candle: price trades through a level and
+//      closes back inside it. Pools are checked most-significant-first —
+//      H4 swing (5-bar fractal), then previous day's high/low.
+//   3. The sweep alone arms the setup (no market-structure-shift requirement).
+//      The stop is the sweep candle's OWN extreme.
+//   4. Entry on M15: 50% into the fair value gap the move left behind, or into
+//      the last opposite-colour candle's body if no gap formed.
+//   5. Target 5R. Stop moves to entry once the trade reaches 2R.
+//
+// NOT VALIDATED OUT OF SAMPLE. This configuration was chosen by searching a
+// 12-cell grid on a research window and its holdout was already spent on the
+// previous version. Research-window figures across 8 Bybit perps were 298
+// trades, 24.2% win rate, PF 1.457. Those are evidence about that window and
+// nothing else. See docs/strategies/ict-liquidity-sweep-v2.md.
+
+strategy("ICT Liquidity Sweep v2", "ICT Sweep v2", overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.cash, default_qty_value = 0,
+     pyramiding = 0,
+     commission_type = strategy.commission.percent, commission_value = 0.02,
+     slippage = 1,
+     calc_on_every_tick = false)
+
+// ---------------------------------------------------------------- Inputs ----
+grpS = "Structure (frozen — changing these is a different strategy)"
+swingLbInput      = input.int(5,    "H4 swing lookback",     minval = 1, group = grpS, tooltip = "Bars either side of a fractal swing point. The bot uses 5.")
+biasEmaInput      = input.int(50,   "Bias EMA (D1 and H4)",  minval = 1, group = grpS)
+atrLenInput       = input.int(14,   "ATR period",            minval = 1, group = grpS)
+usePdhPdlInput    = input.bool(true,  "Sweep previous day's high/low", group = grpS)
+useOrderBlockInput= input.bool(true,  "Order-block fallback when no FVG", group = grpS)
+obLookbackInput   = input.int(5,    "Order-block lookback (M15 bars)", minval = 1, group = grpS)
+setupExpiryInput  = input.int(12,   "Setup expiry (H4 bars)", minval = 1, group = grpS, tooltip = "An armed sweep is discarded after this many H4 bars.")
+orderExpiryInput  = input.int(12,   "Resting order expiry (M15 bars)", minval = 1, group = grpS)
+
+grpT = "Trade levels"
+fvgFractionInput  = input.float(0.5, "Entry depth into the zone", minval = 0.01, maxval = 1.0, step = 0.05, group = grpT, tooltip = "0.5 is the midpoint of the FVG or order block.")
+rewardMultInput   = input.float(5.0, "Reward multiple (R)", minval = 0.1, step = 0.5, group = grpT)
+breakevenAtRInput = input.float(2.0, "Move stop to entry at (R)", minval = 0.0, step = 0.5, group = grpT, tooltip = "0 disables the breakeven stop.")
+riskPctInput      = input.float(1.0, "Risk per trade (% of equity)", minval = 0.01, maxval = 100, step = 0.25, group = grpT)
+
+grpD = "Direction"
+allowLongInput    = input.bool(true, "Allow longs",  group = grpD)
+allowShortInput   = input.bool(true, "Allow shorts", group = grpD)
+
+grpV = "Display"
+showZonesInput    = input.bool(true, "Show entry zones", group = grpV)
+showLevelsInput   = input.bool(true, "Show entry / stop / target", group = grpV)
+showSweepsInput   = input.bool(true, "Mark liquidity sweeps", group = grpV)
+
+// ------------------------------------------------- Higher timeframe data ----
+// Fractal swings are computed inside the H4 context so they confirm exactly as
+// the bot's is_swing_high/is_swing_low do: `swingLb` bars must sit either side,
+// so a swing is only usable `swingLb` bars after it formed. lookahead_off keeps
+// that honest — nothing here can see an unclosed H4 bar.
+f_h4() =>
+    ph = ta.pivothigh(high, swingLbInput, swingLbInput)
+    pl = ta.pivotlow(low, swingLbInput, swingLbInput)
+    var float lastPh = na
+    var float lastPl = na
+    lastPh := na(ph) ? lastPh : ph
+    lastPl := na(pl) ? lastPl : pl
+    [lastPh, lastPl, high, low, close, ta.ema(close, biasEmaInput), time]
+
+[h4SwingHigh, h4SwingLow, h4High, h4Low, h4Close, h4Ema, h4Time] =
+     request.security(syminfo.tickerid, "240", f_h4(), lookahead = barmerge.lookahead_off)
+
+// With lookahead_off on an intraday chart these are the last CLOSED daily bar's
+// values — i.e. the previous day's high and low, which is what gets swept.
+f_d1() =>
+    [close, ta.ema(close, biasEmaInput), high, low]
+
+[d1Close, d1Ema, pdh, pdl] =
+     request.security(syminfo.tickerid, "D", f_d1(), lookahead = barmerge.lookahead_off)
+
+atrValue = ta.atr(atrLenInput)
+
+// ------------------------------------------------------------------ Bias ----
+// Both higher timeframes must agree. Disagreement is not a weaker signal, it
+// is no signal.
+biasBull = not na(d1Ema) and not na(h4Ema) and d1Close > d1Ema and h4Close > h4Ema
+biasBear = not na(d1Ema) and not na(h4Ema) and d1Close < d1Ema and h4Close < h4Ema
+
+// --------------------------------------------------------- Liquidity sweep ---
+// A sweep trades THROUGH a level and closes back inside it: sold into the lows
+// and recovered (bullish), or bought into the highs and rejected (bearish).
+newH4Bar = ta.change(h4Time) != 0
+
+var int   h4BarCount   = 0
+var int   setupDir     = 0        // 1 = long setup, -1 = short setup, 0 = none
+var float sweepExtreme = na
+var int   armedAtH4    = 0
+
+if newH4Bar
+    h4BarCount += 1
+
+sweptBull = false
+sweptBear = false
+if newH4Bar
+    // Most-significant pool first; the first match wins, exactly as the bot
+    // orders them. Within a pool the low sweep is tested before the high.
+    if not na(h4SwingLow) and h4Low < h4SwingLow and h4Close > h4SwingLow
+        sweptBull := true
+    else if not na(h4SwingHigh) and h4High > h4SwingHigh and h4Close < h4SwingHigh
+        sweptBear := true
+    else if usePdhPdlInput and not na(pdl) and h4Low < pdl and h4Close > pdl
+        sweptBull := true
+    else if usePdhPdlInput and not na(pdh) and h4High > pdh and h4Close < pdh
+        sweptBear := true
+
+if sweptBull
+    setupDir     := 1
+    sweepExtreme := h4Low       // the stop sits on the level price rejected
+    armedAtH4    := h4BarCount
+else if sweptBear
+    setupDir     := -1
+    sweepExtreme := h4High
+    armedAtH4    := h4BarCount
+
+// Expire BEFORE any other gate. An armed setup whose bias never aligned used
+// to sit forever and could fire months after the sweep that justified it.
+if setupDir != 0 and h4BarCount - armedAtH4 > setupExpiryInput
+    setupDir     := 0
+    sweepExtreme := na
+
+// --------------------------------------------------- Entry zone on the M15 ---
+// Fair value gap: a three-candle displacement leaving an untraded gap between
+// candle 1's extreme and candle 3's opposite extreme.
+bullFvg = high[2] < low
+bearFvg = low[2] > high
+
+float zoneLow  = na
+float zoneHigh = na
+
+if setupDir == 1 and bullFvg
+    zoneLow  := high[2]
+    zoneHigh := low
+else if setupDir == -1 and bearFvg
+    zoneLow  := high
+    zoneHigh := low[2]
+
+// Order block fallback: the most recent opposite-colour candle body within the
+// lookback. A gap is one of several arrays a sweep can leave behind, and
+// requiring an FVG discards setups that left a different footprint.
+if useOrderBlockInput and na(zoneLow) and setupDir != 0
+    for i = 0 to obLookbackInput - 1
+        isDown = close[i] < open[i]
+        isUp   = close[i] > open[i]
+        if setupDir == 1 and isDown
+            zoneLow  := close[i]
+            zoneHigh := open[i]
+            break
+        if setupDir == -1 and isUp
+            zoneLow  := open[i]
+            zoneHigh := close[i]
+            break
+
+// A doji has no body and therefore no zone to enter.
+hasZone = not na(zoneLow) and not na(zoneHigh) and zoneHigh > zoneLow
+
+entryPrice = float(na)
+if hasZone
+    span = zoneHigh - zoneLow
+    entryPrice := setupDir == 1 ? zoneHigh - span * fvgFractionInput
+                                : zoneLow  + span * fvgFractionInput
+
+// --------------------------------------------------------- Signal assembly ---
+dirAllowed  = setupDir == 1 ? allowLongInput : setupDir == -1 ? allowShortInput : false
+biasAligned = (setupDir == 1 and biasBull) or (setupDir == -1 and biasBear)
+
+// The stop must sit on the correct side of the entry: a stop already breached
+// means price invalidated the setup before the zone formed.
+stopValid = setupDir == 1 ? sweepExtreme < entryPrice
+          : setupDir == -1 ? sweepExtreme > entryPrice : false
+
+longSignal  = strategy.position_size == 0 and setupDir ==  1 and hasZone and dirAllowed and biasAligned and stopValid and not na(entryPrice)
+shortSignal = strategy.position_size == 0 and setupDir == -1 and hasZone and dirAllowed and biasAligned and stopValid and not na(entryPrice)
+
+// ---------------------------------------------------------------- Orders ----
+var float pendingEntry  = na
+var float pendingStop   = na
+var float pendingTarget = na
+var int   pendingBar    = na
+var bool  movedToBe     = false
+
+if longSignal or shortSignal
+    risk = math.abs(entryPrice - sweepExtreme)
+    if risk > 0
+        pendingEntry  := entryPrice
+        pendingStop   := sweepExtreme
+        pendingTarget := longSignal ? entryPrice + risk * rewardMultInput
+                                    : entryPrice - risk * rewardMultInput
+        pendingBar    := bar_index
+        movedToBe     := false
+        // One setup produces at most one entry, so a lingering zone cannot
+        // fire repeatedly.
+        setupDir      := 0
+
+        qty = (strategy.equity * riskPctInput / 100) / risk
+        if longSignal
+            strategy.entry("Long", strategy.long, qty = qty, limit = pendingEntry)
+        else
+            strategy.entry("Short", strategy.short, qty = qty, limit = pendingEntry)
+
+// A resting entry that has not filled within its window is cancelled: the
+// structural reason for it has gone stale.
+if not na(pendingBar) and strategy.position_size == 0 and bar_index - pendingBar > orderExpiryInput
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    pendingEntry  := na
+    pendingStop   := na
+    pendingTarget := na
+    pendingBar    := na
+
+// ------------------------------------------------------- Exits + breakeven ---
+// The stop is pulled to ENTRY exactly, not entry-plus-a-tick: the point is to
+// stop losing on the trade, not to claim a profit the fill would not capture.
+if strategy.position_size != 0 and not na(pendingStop) and not na(pendingTarget)
+    initialRisk = math.abs(strategy.position_avg_price - pendingStop)
+    if breakevenAtRInput > 0 and not movedToBe and initialRisk > 0
+        travelled = strategy.position_size > 0 ? high - strategy.position_avg_price
+                                               : strategy.position_avg_price - low
+        if travelled >= initialRisk * breakevenAtRInput
+            movedToBe := true
+
+    activeStop = movedToBe ? strategy.position_avg_price : pendingStop
+    if strategy.position_size > 0
+        strategy.exit("Long X", from_entry = "Long", stop = activeStop, limit = pendingTarget)
+    else
+        strategy.exit("Short X", from_entry = "Short", stop = activeStop, limit = pendingTarget)
+
+if strategy.position_size == 0 and na(pendingBar)
+    movedToBe := false
+
+// ----------------------------------------------------------- Visualisation ---
+plotshape(showSweepsInput and sweptBull, "Bullish sweep", shape.triangleup,
+     location.belowbar, color.new(color.teal, 0), size = size.tiny)
+plotshape(showSweepsInput and sweptBear, "Bearish sweep", shape.triangledown,
+     location.abovebar, color.new(color.red, 0), size = size.tiny)
+
+inTrade = strategy.position_size != 0
+plot(showLevelsInput and inTrade ? strategy.position_avg_price : na, "Entry",
+     color.new(#5b9cf6, 0), style = plot.style_linebr, linewidth = 2)
+plot(showLevelsInput and inTrade ? (movedToBe ? strategy.position_avg_price : pendingStop) : na,
+     "Stop", color.new(#f23645, 0), style = plot.style_linebr, linewidth = 2)
+plot(showLevelsInput and inTrade ? pendingTarget : na, "Target",
+     color.new(#089981, 0), style = plot.style_linebr, linewidth = 2)
+
+bgcolor(showZonesInput and hasZone and setupDir == 1 ? color.new(color.teal, 92)
+      : showZonesInput and hasZone and setupDir == -1 ? color.new(color.red, 92) : na)
+
+plot(showLevelsInput ? h4Ema : na, "H4 bias EMA", color.new(color.orange, 60))
+plot(showLevelsInput and usePdhPdlInput ? pdh : na, "PDH", color.new(color.gray, 50), style = plot.style_stepline)
+plot(showLevelsInput and usePdhPdlInput ? pdl : na, "PDL", color.new(color.gray, 50), style = plot.style_stepline)
+
+// --------------------------------------------------------------- Alerts -----
+alertcondition(longSignal,  "ICT long setup",  "ICT sweep long on {{ticker}}")
+alertcondition(shortSignal, "ICT short setup", "ICT sweep short on {{ticker}}")
