@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use botcore::{Candle, Side, Symbol, Timeframe};
+use botcore::{Side, Symbol, Timeframe};
 use indicators::Atr;
 use rust_decimal::Decimal;
 
