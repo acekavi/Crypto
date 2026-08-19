@@ -509,6 +509,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             _ = rerank.tick() => {
+                // A pinned universe is fixed BY DEFINITION. Re-ranking it
+                // swaps in symbols the strategy was never measured on: the
+                // turnover screen replaced the eight validated perps with
+                // dated futures (BTCUSDT-26MAR27, ETHUSDT-25JUN27) and
+                // unrelated altcoins within two days of going live, because
+                // only startup consulted `universe.symbols` and this arm did
+                // not.
+                if config.universe.symbols.is_some() {
+                    info!("universe is pinned by config; skipping the daily re-rank");
+                    continue;
+                }
                 let protected = engine_loop.protected_symbols().await?;
                 let tickers = rest.tickers().await?;
                 let fresh_instruments = rest.instruments().await?;
