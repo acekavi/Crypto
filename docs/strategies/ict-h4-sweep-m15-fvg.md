@@ -383,3 +383,23 @@ true — resting-order fills once depended on `HashMap` iteration order and the 
 - `docs/superpowers/specs/2026-08-07-phase2-backtester-design.md` — backtester design and gate
 - `.superpowers/sdd/2026-08-07-phase2c-walk-forward-and-gate/entry-research-report.md` — why the
   trend strategy failed
+
+---
+
+## Volume profile — considered and skipped, not tested
+
+Raised 2026-08-19. Not built, for two reasons stated before any code was written:
+
+1. **No falsifiable evidence anywhere in a web search.** Every source found (Trade Ideas, TradeZella,
+   Fazen Capital, Quantum-Algo, Trader-Dale) is trader-education content describing POC/value-area
+   mechanism with zero win rate, profit factor, sample size, or cost-adjusted return attached — the
+   same category of noise flagged for RSI/MACD/golden-cross content, distinct from the funding-rate
+   literature that had real numbers.
+2. **The data cannot build a real one.** `data/history.db` stores OHLCV only — one volume figure per
+   candle, no intra-candle price distribution. A volume profile needs volume distributed ACROSS price
+   within each candle. Any POC/value-area built from this data is a degraded proxy (e.g. spreading a
+   candle's volume evenly across its H-L range), not the real construction the sources describe.
+
+Owner's call, given both constraints: skip rather than spend a pre-registration and backtest cycle on
+an unfalsified idea tested with a weak proxy. Revisit if minute-level or trade-level data is ever
+downloaded.
