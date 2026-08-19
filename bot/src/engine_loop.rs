@@ -133,6 +133,8 @@ pub struct EngineLoop {
     executor: Executor,
     tracker: OrderTracker,
     store: CandleStore,
+    /// Candles a REST rewarm fetches when a stream wedges on a gap.
+    warmup_candles: usize,
     instruments: HashMap<String, Instrument>,
     high_water_mark: Decimal,
     day_start_equity: Decimal,
@@ -197,6 +199,7 @@ impl EngineLoop {
             executor,
             tracker: OrderTracker::new(entry_expiry_candles),
             store: CandleStore::new(warmup_candles),
+            warmup_candles,
             instruments: instruments
                 .into_iter()
                 .map(|i| (i.symbol.as_str().to_string(), i))
@@ -1081,8 +1084,43 @@ impl EngineLoop {
         // The stream advances only on Accepted. A gap must be backfilled by
         // the feed before the engine sees the next candle, so anything else
         // stops here.
-        if self.store.accept(symbol, tf, candle) != Acceptance::Accepted {
-            return Ok(CandleOutcome::Skipped(SkipReason::NotAccepted));
+        match self.store.accept(symbol, tf, candle) {
+            Acceptance::Accepted => {}
+            Acceptance::Gap { missing } => {
+                // A gap WEDGES the stream. `accept` deliberately does not
+                // advance `last_open_ms` on a gap, so the next candle is also
+                // a gap, and so is every one after it — the symbol goes
+                // permanently silent.
+                //
+                // The feed emits `GapFilled` when IT notices a hole, but the
+                // feed's gap tracker is separate state that resets on a
+                // WebSocket reconnect. After a reconnect it sees no gap,
+                // sends no backfill, and nothing ever un-wedges the store.
+                // Observed live: seven of eight symbols returned
+                // Skipped(NotAccepted) on every candle for five days, so the
+                // strategy evaluated nothing and no order was ever placed.
+                //
+                // Heal here, where the stale state actually lives, rather
+                // than depending on another component's view of it.
+                warn!(%symbol, ?tf, missing, "candle gap; rewarming from REST");
+                let limit = self.warmup_candles.min(u16::MAX as usize) as u16;
+                match self.client.klines(symbol, tf, limit).await {
+                    Ok(fresh) => {
+                        self.warm(symbol, tf, fresh);
+                        if self.store.accept(symbol, tf, candle) != Acceptance::Accepted {
+                            // The rewarm already carries this candle, or it
+                            // still does not line up. Either way the stream is
+                            // current again, so the NEXT candle lands.
+                            return Ok(CandleOutcome::Skipped(SkipReason::NotAccepted));
+                        }
+                    }
+                    Err(e) => {
+                        warn!(%symbol, ?tf, error = %e, "gap rewarm failed; retrying next candle");
+                        return Ok(CandleOutcome::Skipped(SkipReason::NotAccepted));
+                    }
+                }
+            }
+            _ => return Ok(CandleOutcome::Skipped(SkipReason::NotAccepted)),
         }
 
         // Expire resting entries whose window has elapsed. A partial fill is

@@ -724,3 +724,42 @@ async fn warming_an_unknown_symbol_still_seeds_the_store_without_panicking() {
         "no instrument means no context, so the strategy is not fed"
     );
 }
+
+/// A gap must not wedge the stream forever.
+///
+/// `CandleStore::accept` returns `Gap` without advancing `last_open_ms`, so
+/// without self-healing the next candle is also a gap and the symbol goes
+/// permanently silent. Observed live: seven of eight symbols returned
+/// Skipped(NotAccepted) on every candle for five days after a WebSocket
+/// reconnect, because the feed's separate gap tracker had reset and so never
+/// sent the backfill the store was waiting for.
+#[tokio::test]
+async fn a_gap_rewarms_from_rest_instead_of_wedging_the_stream() {
+    let mock = Arc::new(MockExchange::new().with_instruments(vec![instrument()]));
+    let (mut engine, _dir) = loop_with(Arc::clone(&mock)).await;
+
+    // Seed the stream, then jump far enough ahead to look like a gap.
+    engine.warm(&Symbol::new("BTCUSDT"), Timeframe::H1, vec![candle(0)]);
+    let far_future = candle(20 * Timeframe::H1.duration_ms());
+
+    let first = engine
+        .on_candle_closed(&Symbol::new("BTCUSDT"), Timeframe::H1, &far_future)
+        .await
+        .expect("gap must not error");
+    assert!(
+        matches!(first, CandleOutcome::Skipped(_)),
+        "the gapped candle itself is not tradeable"
+    );
+
+    // The heal must have refetched, so the NEXT candle is accepted rather
+    // than reported as yet another gap.
+    let next = candle(21 * Timeframe::H1.duration_ms());
+    let second = engine
+        .on_candle_closed(&Symbol::new("BTCUSDT"), Timeframe::H1, &next)
+        .await
+        .expect("second candle");
+    assert!(
+        !matches!(second, CandleOutcome::Skipped(SkipReason::NotAccepted)),
+        "the stream must have resynced, got {second:?}"
+    );
+}
