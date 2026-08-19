@@ -94,3 +94,70 @@ TSMOM holds until the signal flips, with no fixed target and no stop, which cont
 - Dropping symbols or years until a t-statistic clears
 - Reporting the best cell without reporting all 6
 - Treating a gross-of-cost or gross-of-beta number as the headline
+
+---
+
+# RESULT — REJECTED
+
+Run 2026-08-19 on `data/wide.db`: 292 symbols with ≥ 200 daily closes.
+
+## All six cells fail
+
+Payoffs are net of passive exposure, sampled on **non-overlapping** windows.
+
+| L | H | n | net % | t | verdict |
+|---|---|---|---|---|---|
+| 7 | 1 | 205,967 | +0.009 | 0.39 | FAIL |
+| 7 | 7 | 29,351 | −0.325 | −1.12 | FAIL |
+| 30 | 1 | 199,384 | +0.004 | 0.16 | FAIL |
+| 30 | 7 | 28,346 | +0.187 | 0.96 | FAIL |
+| 90 | 1 | 181,931 | +0.049 | 2.12 | FAIL |
+| 90 | 7 | 25,875 | +0.232 | 0.92 | FAIL |
+
+Nothing approaches the pre-registered t > 3.0.
+
+## The apparent winner was an overlap artifact
+
+Sampled daily, L=30/H=7 scored **t = 4.80** and looked like a clear pass. But a 7-day forward return
+sampled every day reuses six of its seven days in the next observation, so those observations are not
+independent and the t-statistic is inflated by roughly √H.
+
+| sampling | n | net % | t |
+|---|---|---|---|
+| overlapping (daily) | 197,633 | +0.376 | **4.80** |
+| non-overlapping (every 7 days) | 28,346 | +0.187 | **0.96** |
+
+Same data, same rule. The entire result was a counting artifact. This is the single most common way a
+momentum study manufactures significance, and it is worth recording as the reason this project now
+samples non-overlapping windows by default.
+
+## The sign flips by year
+
+L=30/H=7, non-overlapping:
+
+| year | n | net % | t |
+|---|---|---|---|
+| 2023 | 1,735 | **−1.986** | −6.94 |
+| 2024 | 6,734 | **−1.745** | −5.37 |
+| 2025 | 11,049 | **+1.621** | +4.63 |
+| 2026 | 8,828 | +0.294 | +0.79 |
+
+Two years strongly negative, one strongly positive. The pooled positive number comes almost entirely
+from 2025, which also carries the most observations. That is regime dependence, not a signal — and it
+fails the pre-registered consistency criterion outright.
+
+## Not an outlier problem either
+
+171 of 292 symbols positive (59%). Trimming the top and bottom five leaves +0.155% against +0.187%
+pooled, so the result is neither rescued nor caused by a handful of extreme symbols. It is simply
+absent.
+
+## What this closes
+
+Both momentum constructions have now been tested on this data and both are rejected: cross-sectional
+at t = 2.32 in the 8-signal screen, time-series here with nothing above t = 2.12.
+
+Combined with four rejected strategies (trend continuation, mean reversion, ICT, funding carry), that
+is substantive evidence that simple systematic edges are not available to this project on liquid
+crypto perpetuals with the data it has. Per the pre-registration, this ends the momentum line rather
+than prompting a wider search.
