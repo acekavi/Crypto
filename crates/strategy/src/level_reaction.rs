@@ -82,6 +82,12 @@ pub struct LevelParams {
     pub stop_source: StopSource,
     /// ATR margin added beyond the structural stop, in either direction.
     pub stop_buffer_atr: Decimal,
+    /// Minimum range of the REACTION candle, in ATRs, for the setup to
+    /// qualify. Filters weak, doji-like reactions that show no conviction
+    /// either way, distinct from every entry/stop lever already tested —
+    /// this changes WHETHER a setup is taken, not where the entry or stop
+    /// sits within one that already qualified.
+    pub min_reaction_atr: Decimal,
     /// Gate entries to the New York session.
     ///
     /// A FIXED UTC window approximating 09:30-16:00 ET, so it is one hour off
@@ -109,6 +115,7 @@ impl LevelParams {
             entry_fraction: Decimal::ZERO,
             stop_source: StopSource::TouchAndReaction,
             stop_buffer_atr: Decimal::ZERO,
+            min_reaction_atr: Decimal::ZERO,
             session_filter: false,
             ny_open_ms: 13 * 3_600_000 + 30 * 60_000, // 13:30 UTC
             ny_close_ms: 20 * 3_600_000,              // 20:00 UTC
@@ -296,6 +303,12 @@ impl Strategy for LevelReactionStrategy {
                 // Gate on the reaction candle: it is the one that decides the
                 // entry, so that is the moment the session has to be open.
                 if p.session_filter && !in_ny_session(c.open_time_ms, p.ny_open_ms, p.ny_close_ms) {
+                    return None;
+                }
+
+                // A weak, doji-like reaction shows no conviction either way
+                // and is filtered before the held/failed read even matters.
+                if (c.high - c.low) < atr * p.min_reaction_atr {
                     return None;
                 }
 

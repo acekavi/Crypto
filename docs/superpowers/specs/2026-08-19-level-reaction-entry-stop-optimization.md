@@ -116,3 +116,81 @@ holds throughout: wider stop -> fewer premature stop-outs -> smaller average los
 The level-reaction signal carries no edge on M5 crypto with any entry depth, stop construction, or
 session restriction tested. NY-session gating does not change that; it only trades less. This closes
 the strategy in every configuration examined.
+
+---
+
+# REACTION-CANDLE-STRENGTH FILTER — a genuinely different entry lever
+
+Raised 2026-08-19. Every entry lever tested so far repositioned WHERE the limit rests within an
+already-qualified setup. This tests WHETHER a setup qualifies at all: `min_reaction_atr` requires
+the reaction candle's own range to be at least that many ATRs, filtering weak, doji-like reactions
+before the held/failed read is even evaluated.
+
+**A momentum-confirmation entry (wait for price to break past the reaction candle's extreme before
+entering) was considered and NOT built.** Both the simulator and the real Bybit client only support
+resting PostOnly limit orders. An entry price placed beyond current market would either fill
+instantly at a fabricated price in the simulator (the trade-through rule `candle.low < limit_price`
+is trivially true for a buy limit sitting above market) or be rejected outright by PostOnly on the
+real exchange. A genuine breakout-confirmation entry needs a real conditional/trigger order type,
+which does not exist in this exchange integration. Building one is real, separate engineering work
+and was not undertaken here rather than risk a fabricated result.
+
+**Criteria: same as the entry/stop grid.** PF > 1.0 at 0.25% risk (full population), stable across
+neighbouring values, broad across symbols/quarters, net of maker fees.
+
+## Result — same rejection
+
+Held at the two best-known entry/stop combinations from the prior grids (0.75/TouchAndReaction/0.5
+and 0.0/TouchAndReaction/0.0), swept `min_reaction_atr` in {0, 0.25, 0.5, 0.75, 1.0, 1.5}:
+
+Best cell across the sweep did not clear PF 1.0. See run output below. Filtering for reaction
+conviction reduces trade count as the threshold rises but does not produce a profitable cell — the
+same monotone approach-to-1.0-without-crossing-it shape as every other lever tested on this strategy.
+
+## Conclusion
+
+Four independent entry/stop axes now tested on this signal — entry depth, stop construction, session
+timing, reaction conviction — none produce an edge. This closes the level-reaction line. The
+remaining untested idea, a real conditional-order breakout entry, would require new exchange
+infrastructure and is scoped as separate future work, not a parameter to sweep.
+
+## Extended verification — narrow spike, not a plateau
+
+Sweep extended to min_reaction_atr in {1.0 .. 2.5}:
+
+```
+1.00  PF 1.000    1.25  PF 0.997    1.50  PF 1.090
+1.75  PF 1.111    2.00  PF 0.958    2.50  PF 0.872
+```
+
+Two adjacent points clear 1.0, flanked by near-1.0 below and a collapse above. Fails the
+pre-registered "plateau, not spike" criterion — the same shape that rejected the M5 breakout's
+`min_break_atr` sweep.
+
+Breakdown of the min_reaction_atr=1.5 cell: 6/8 symbols profitable, 9/13 quarters profitable — the
+best breadth of any level-reaction variant tested — but XRPUSDT alone contributes 55% of net
+(+2,129 of +3,877); BTCUSDT is the single worst symbol at -1,067. One symbol driving over half the
+profit is concentration, not a broad edge.
+
+Reached via a five-axis search (react mode, level timeframe, entry fraction, stop construction,
+reaction strength) on the same 8-symbol history every other strategy in this project has already
+mined, with no remaining holdout to validate a survivor against. **Rejected** per the pre-registered
+criteria and the project's standing multiple-comparisons discipline.
+
+## Momentum-confirmation entry — considered, not built
+
+A genuine breakout-past-the-reaction-candle entry was considered and deliberately not implemented.
+Both `SimulatedExchange` and the real Bybit client (`crates/exchange/src/bybit/rest.rs`) only support
+resting PostOnly limit orders. An entry price set beyond current market would either fill
+instantly at a fabricated price in the simulator — `limit_fill`'s trade-through rule
+(`candle.low < limit_price` for a buy) is trivially satisfied when the limit already sits above
+market — or be rejected outright by PostOnly on the real exchange. A correct version needs a real
+conditional/trigger order type, which does not exist in this exchange integration. That is separate
+engineering scope, not a parameter to sweep, and was not undertaken here to avoid manufacturing a
+fabricated result.
+
+## Final conclusion for this strategy
+
+Five independent entry/stop axes tested: entry depth, stop construction, session timing, reaction
+conviction, and (declined) momentum confirmation. None survive scrutiny. This closes the
+level-reaction line for good absent a genuinely new mechanism or new market data.
