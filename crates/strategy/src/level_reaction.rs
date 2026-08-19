@@ -20,13 +20,16 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use std::collections::HashSet;
+
 use botcore::{Candle, Side, Symbol, Timeframe};
-use indicators::Atr;
+use indicators::{Atr, Ema};
 use rust_decimal::Decimal;
 
 use crate::ict::{in_ny_session, is_swing_high, is_swing_low};
 use crate::signal::{MarketContext, Signal};
 use crate::traits::Strategy;
+use crate::volume_profile;
 
 /// Which reading of the reaction candle is traded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +100,21 @@ pub struct LevelParams {
     /// Execution candles allowed to wait for that confirmation before the
     /// setup is abandoned.
     pub confirm_window: usize,
+    /// A PROXY volume profile: real volume profile needs volume distributed
+    /// across price WITHIN a candle, which this project's OHLCV data does
+    /// not have. Here each candle's volume is spread evenly across the
+    /// fixed-width buckets its own range spans, over the trailing
+    /// `vp_lookback` execution candles. Evaluated only at candidate entry
+    /// candles, not continuously.
+    pub require_level_in_value_area: bool,
+    pub vp_lookback: usize,
+    pub vp_buckets: usize,
+    /// Require the trade direction to agree with price's position relative
+    /// to the `bias_ema_period` EMA on `bias_tf` — the same higher-timeframe
+    /// bias construction `IctStrategy` uses.
+    pub require_bias_alignment: bool,
+    pub bias_tf: Timeframe,
+    pub bias_ema_period: usize,
     /// Gate entries to the New York session.
     ///
     /// A FIXED UTC window approximating 09:30-16:00 ET, so it is one hour off
@@ -127,6 +145,12 @@ impl LevelParams {
             min_reaction_atr: Decimal::ZERO,
             confirm_margin_atr: None,
             confirm_window: 12,
+            require_level_in_value_area: false,
+            vp_lookback: 100,
+            vp_buckets: 24,
+            require_bias_alignment: false,
+            bias_tf: Timeframe::D1,
+            bias_ema_period: 50,
             session_filter: false,
             ny_open_ms: 13 * 3_600_000 + 30 * 60_000, // 13:30 UTC
             ny_close_ms: 20 * 3_600_000,              // 20:00 UTC
@@ -174,6 +198,10 @@ struct SymbolState {
     supports: VecDeque<Decimal>,
     atr: Atr,
     phase: Phase,
+    /// Trailing execution-timeframe candles for the volume profile proxy.
+    exec_window: VecDeque<Candle>,
+    bias_ema: Ema,
+    bias: Option<Dir>,
 }
 
 impl SymbolState {
@@ -183,6 +211,9 @@ impl SymbolState {
             resistances: VecDeque::new(),
             supports: VecDeque::new(),
             atr: Atr::new(p.atr_period),
+            exec_window: VecDeque::new(),
+            bias_ema: Ema::new(p.bias_ema_period),
+            bias: None,
             phase: Phase::Idle,
         }
     }
@@ -196,7 +227,12 @@ pub struct LevelReactionStrategy {
 
 impl LevelReactionStrategy {
     pub fn new(params: LevelParams) -> Self {
-        let timeframes = vec![params.level_tf, params.execution_tf];
+        let mut seen = HashSet::new();
+        let mut timeframes = vec![params.level_tf, params.execution_tf];
+        if params.require_bias_alignment {
+            timeframes.push(params.bias_tf);
+        }
+        timeframes.retain(|tf| seen.insert(*tf));
         LevelReactionStrategy {
             params,
             per_symbol: HashMap::new(),
@@ -251,12 +287,22 @@ impl Strategy for LevelReactionStrategy {
             .or_insert_with(|| SymbolState::new(&p));
         let c = ctx.candle;
 
+        if p.require_bias_alignment && ctx.timeframe == p.bias_tf {
+            let ema = state.bias_ema.update(c.close);
+            state.bias = ema.map(|e| if c.close > e { Dir::Up } else { Dir::Down });
+            return None;
+        }
         if ctx.timeframe == p.level_tf {
             track_levels(state, &p, c);
             return None;
         }
         if ctx.timeframe != p.execution_tf {
             return None;
+        }
+
+        state.exec_window.push_back(c.clone());
+        while state.exec_window.len() > p.vp_lookback {
+            state.exec_window.pop_front();
         }
 
         let atr = state.atr.update(c)?;
@@ -351,6 +397,28 @@ impl Strategy for LevelReactionStrategy {
                     },
                     _ => return None,
                 };
+
+                // Confluence 1: higher-timeframe bias must agree with the
+                // direction actually being traded. `None` means the EMA has
+                // not warmed up yet, which fails the gate rather than passing
+                // it — an unconfirmed bias is not evidence of alignment.
+                if p.require_bias_alignment && state.bias != Some(trade_dir) {
+                    return None;
+                }
+
+                // Confluence 2: the broken level itself must sit inside the
+                // trailing volume profile's value area — a level backed by
+                // real trading history, not a naked one. `exec_window`
+                // already includes this reaction candle (pushed on arrival
+                // above), so this uses no data not yet closed.
+                if p.require_level_in_value_area {
+                    let candles: Vec<Candle> = state.exec_window.iter().cloned().collect();
+                    let in_value_area = volume_profile::build(&candles, p.vp_buckets)
+                        .is_some_and(|vp| vp.contains(level));
+                    if !in_value_area {
+                        return None;
+                    }
+                }
 
                 if p.confirm_margin_atr.is_some() {
                     // Do not commit yet: wait for a later candle to prove the

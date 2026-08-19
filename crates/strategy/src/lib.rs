@@ -7,6 +7,7 @@ pub mod pullback;
 pub mod reversion;
 pub mod signal;
 pub mod traits;
+pub mod volume_profile;
 
 pub use breakout::{BreakoutParams, BreakoutStrategy};
 pub use ict::{Funnel, IctParams, IctStrategy};

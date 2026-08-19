@@ -245,3 +245,87 @@ construction, session timing, reaction conviction, momentum confirmation (declin
 reasons), and second-candle confirmation — none produce a result that survives being checked against
 its own selection history. This closes the level-reaction line. No further parameter search on this
 strategy is warranted without a genuinely new market mechanism or new data.
+
+---
+
+# VOLUME PROFILE + BIAS CONFLUENCE
+
+Requested 2026-08-19: add volume profile as a confluence to the most promising breakout-family
+strategy (level-reaction), plus one more confluence, checked only at candidate entry candles, across
+all sessions.
+
+**Data limitation restated, not re-litigated:** `data/history.db` is OHLCV only, no intra-candle
+price distribution. `volume_profile::build` is a declared PROXY — each candle's volume spread evenly
+across fixed-width buckets its own range spans over a trailing 100-candle window — weaker than a real
+tick-built profile. Built as a confluence gate, evaluated only when a reaction candle produces a
+candidate entry (not continuously), per the request.
+
+**Second confluence, chosen and justified:** higher-timeframe bias alignment — trade direction must
+agree with price's position relative to a 50-period EMA on D1. This reuses the exact construction
+`IctStrategy` already uses for its own bias gate, rather than inventing an arbitrary new mechanism.
+
+**Base held plain, deliberately not stacked on prior "best" cells.** `min_reaction_atr`,
+`confirm_margin_atr` and all other previously-tested-and-rejected levers stay at their defaults. Both
+confluences are tested for whether they add real information to the base signal, not for whether they
+can be piled onto an already-cherry-picked cell — the second-confirmation test showed exactly why that
+distinction matters.
+
+Fixed throughout: `session_filter = false` (all sessions, per the request), `risk_pct = 0.25%` (full
+population), `react_mode = Reversal`, `level_tf = H4`, `min_break_atr = 0.25`.
+
+Criteria: PF > 1.0 on the full population, and — given the second-confirmation finding — checked
+against the plain base with the OTHER confluence off, not just against each other.
+
+## Result
+
+```
+baseline (neither)          n=5,378   PF 0.947
++ volume profile only       n=3,147   PF 0.927   -- WORSE than baseline
++ D1 bias only               n=1,655   PF 1.154   -- clears 1.0, unstacked
++ both                        n=938    PF 1.176
+```
+
+**Volume profile adds nothing — consistent with its declared limitation.** The proxy built from
+OHLCV alone makes results worse than the baseline, exactly what a signal built from degraded data
+would be expected to do. This is not evidence volume profile itself is worthless; it is evidence
+that a proxy without real intra-candle distribution carries no information here.
+
+**D1 bias alignment clears PF 1.0 on its first, unstacked test** — the first confluence all session
+to do so without being layered on an already-cherry-picked cell. It reuses `IctStrategy`'s own bias
+construction rather than an invented mechanism.
+
+## Plateau check: EMA period sensitivity
+
+```
+20   PF 1.585    30   PF 1.376    50   PF 1.154
+75   PF 1.098   100   PF 1.098   150   PF 1.037
+```
+
+Monotonic across the whole tested range, every value clears 1.0 — genuinely different from every
+prior spike-then-collapse shape. But the trend runs TOWARD the edge of what was tested rather than
+peaking at an interior point: the shorter (noisier, more reactive) the EMA, the better the number.
+That shape is itself a caution sign — a genuine structural relationship should have an interior
+optimum, not want to keep extending toward the boundary of what was tried. It was not pushed further
+(period 10, 5, ...) per the standing discipline of not chasing a number.
+
+## Breakdown at bias_ema_period=50 (the requested default, matching liquidity_sweep_v2's convention)
+
+```
+symbols 6/8   quarters 5/10
+```
+
+Only half the quarters are profitable despite a positive aggregate: three quarters (2025 Q1/Q2/Q4)
+supply +7,045 against a total net of +5,821 — every other quarter combined is net NEGATIVE. Two
+symbols (SOL + XRP) supply 72% of net. Materially worse breadth-over-time than `liquidity_sweep_v2`
+(9/10 quarters) and comparable concentration to the reaction-strength finding that was already
+rejected for the same reason.
+
+## Conclusion
+
+**Rejected**, but for a different and more informative reason than everything else this session: not
+an isolated spike, not an artifact of stacking on prior selection, but a real signal that is
+concentrated in a handful of quarters and symbols and whose apparent strength increases monotonically
+toward untested, less plausible parameter extremes. That combination — genuine-looking mechanism,
+concentrated realisation — is consistent with the confluence partially capturing a specific trending
+period in this dataset (roughly H2 2025) rather than a stable structural relationship. Closing the
+search here per the standing commitment: one new idea tested, with its own due diligence, then stop.
