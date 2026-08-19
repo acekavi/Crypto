@@ -85,3 +85,34 @@ the one lever not yet isolated from the funding-size artifact that got the base 
 tested here at a fixed 0.25% risk across the full signal population, neither lever produces a
 profitable cell. The signal — a swing-level break, retest and reaction on M5 crypto — does not carry
 enough information to overcome costs, independent of where the stop sits or how deep the entry waits.
+
+---
+
+# NY SESSION RE-TEST — SAME REJECTION
+
+Run 2026-08-19. Identical 30-cell grid, `session_filter: true` (13:30-20:00 UTC) added, nothing
+else changed.
+
+**Best cell: entry_fraction=0.0, TouchOnly, buffer=0.5 ATR -> PF 0.966**, n=2,470, net -1,395.
+Still a loser; still fails the pre-registered PF > 1.0 bar.
+
+## Against the all-hours grid, cell for cell
+
+| | all-hours best | NY-only best |
+|---|---|---|
+| PF | 0.974 | 0.966 |
+| n | 7,040 | 2,470 |
+| net | -2,550 | -1,395 |
+
+Session gating cut the trade count by roughly 65% (consistent with NY being ~27% of the day) but did
+**not** raise profit factor. The best cell actually moved to a different, more conservative corner of
+the grid (entry at the level itself rather than 0.75 toward the reaction close) — sessions changed
+which corner survived best, not whether any corner worked. The same monotone stop_buffer_atr pattern
+holds throughout: wider stop -> fewer premature stop-outs -> smaller average loser -> PF creeps toward
+1.0 without crossing it.
+
+## Conclusion unchanged
+
+The level-reaction signal carries no edge on M5 crypto with any entry depth, stop construction, or
+session restriction tested. NY-session gating does not change that; it only trades less. This closes
+the strategy in every configuration examined.
