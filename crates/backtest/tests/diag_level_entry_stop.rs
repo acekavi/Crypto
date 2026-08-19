@@ -1,7 +1,6 @@
 // DIAGNOSTIC — entry depth x stop construction, fixed at 0.25% risk so the
 // full signal population is funded and no cell benefits from the same
 // margin-selection bias that got the base version rejected.
-use std::collections::BTreeMap;
 
 use backtest::metrics::compute;
 use backtest::{BacktestConfig, CostModel, run_backtest};
