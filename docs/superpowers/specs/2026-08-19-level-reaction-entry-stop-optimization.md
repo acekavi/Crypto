@@ -194,3 +194,54 @@ fabricated result.
 Five independent entry/stop axes tested: entry depth, stop construction, session timing, reaction
 conviction, and (declined) momentum confirmation. None survive scrutiny. This closes the
 level-reaction line for good absent a genuinely new mechanism or new market data.
+
+---
+
+# SIXTH LEVER — second-confirmation entry, and why the loop stopped here
+
+Raised 2026-08-19 in response to "optimize this strategy on loop until you hit PF 2." That framing
+was declined explicitly: searching a parameter space until an arbitrary score appears is not testing
+a hypothesis, and this project's own history (`liquidity_sweep_v1`, PF 1.598 research -> PF 1.054
+holdout) shows exactly what it produces. One genuinely new, honestly-testable idea was built and
+tested once, with a commitment to stop regardless of the result.
+
+**Idea:** require a LATER candle to close beyond the reaction candle's own extreme by
+`confirm_margin_atr` before committing — genuine momentum confirmation using already-closed data,
+implemented as a new state-machine phase (`Phase::AwaitingConfirmation`) rather than a conditional
+order, since neither the simulator nor the real exchange can correctly represent the latter (see the
+prior section).
+
+## Initial result looked like the first non-isolated pass
+
+Stacked on the best-known base (`entry_fraction=0.75`, `TouchAndReaction`, `buffer=0.5`,
+`min_reaction_atr=1.5`), every one of 12 confirmation-enabled cells cleared PF 1.0 (range
+1.073-1.166) against a no-confirmation baseline of 1.090 — the first result all session that wasn't
+an isolated spike surrounded by failures.
+
+## It did not survive the one test that matters: does it work independent of what it's stacked on
+
+| config | n | PF |
+|---|---|---|
+| plain base, no confirmation | 7,040 | 0.975 |
+| plain base, WITH confirmation | 2,943 | **0.930** |
+| min_react=1.5, no confirmation | 2,170 | 1.090 |
+| min_react=1.5, WITH confirmation | 801 | 1.166 |
+
+On the general population, confirmation makes the result worse. It only helps when layered on the
+`min_reaction_atr=1.5` cell that a prior five-axis search had already selected — the precise signature
+of overfitting: an apparent improvement that reverses sign once tested independent of its own
+selection history, rather than a mechanism that holds regardless of what it's applied to.
+
+The best cell's breadth (n=801, 6/8 symbols, 10/13 quarters) looks acceptable in aggregate but rests
+on 60-121 trades per symbol and 29-77 per quarter — too thin at 13-23% win rates on a 1:5 payoff to
+distinguish signal from noise at any individual cut.
+
+## Conclusion
+
+**Rejected, and the loop stops here per the commitment made before running it.** Second-confirmation
+entries do not generalize; they concentrate an already-lucky selection further. Six independent
+entry/stop/confirmation levers have now been tested on this strategy — entry depth, stop
+construction, session timing, reaction conviction, momentum confirmation (declined for engine
+reasons), and second-candle confirmation — none produce a result that survives being checked against
+its own selection history. This closes the level-reaction line. No further parameter search on this
+strategy is warranted without a genuinely new market mechanism or new data.

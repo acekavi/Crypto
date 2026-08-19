@@ -88,6 +88,15 @@ pub struct LevelParams {
     /// this changes WHETHER a setup is taken, not where the entry or stop
     /// sits within one that already qualified.
     pub min_reaction_atr: Decimal,
+    /// If set, a signal only fires once a LATER candle closes beyond the
+    /// reaction candle's own extreme (in the trade direction) by this many
+    /// ATRs — genuine momentum confirmation using already-closed data, not a
+    /// conditional order. `None` keeps the original behaviour: the reaction
+    /// candle alone decides the trade.
+    pub confirm_margin_atr: Option<Decimal>,
+    /// Execution candles allowed to wait for that confirmation before the
+    /// setup is abandoned.
+    pub confirm_window: usize,
     /// Gate entries to the New York session.
     ///
     /// A FIXED UTC window approximating 09:30-16:00 ET, so it is one hour off
@@ -116,6 +125,8 @@ impl LevelParams {
             stop_source: StopSource::TouchAndReaction,
             stop_buffer_atr: Decimal::ZERO,
             min_reaction_atr: Decimal::ZERO,
+            confirm_margin_atr: None,
+            confirm_window: 12,
             session_filter: false,
             ny_open_ms: 13 * 3_600_000 + 30 * 60_000, // 13:30 UTC
             ny_close_ms: 20 * 3_600_000,              // 20:00 UTC
@@ -138,6 +149,21 @@ enum Phase {
         dir: Dir,
         touch_high: Decimal,
         touch_low: Decimal,
+    },
+    /// The reaction candle confirmed a direction; waiting for a LATER candle
+    /// to close beyond the reaction candle's own extreme before committing.
+    AwaitingConfirmation {
+        level: Decimal,
+        trade_dir: Dir,
+        touch_low: Decimal,
+        touch_high: Decimal,
+        reaction_low: Decimal,
+        reaction_high: Decimal,
+        /// Reaction candle's high (Up) / low (Down) — what a later candle
+        /// must close beyond.
+        confirm_extreme: Decimal,
+        atr_at_reaction: Decimal,
+        bars: usize,
     },
 }
 
@@ -326,54 +352,167 @@ impl Strategy for LevelReactionStrategy {
                     _ => return None,
                 };
 
-                // The structure the reaction defended.
-                let (low, high) = match p.stop_source {
-                    StopSource::TouchOnly => (touch_low, touch_high),
-                    StopSource::TouchAndReaction => (touch_low.min(c.low), touch_high.max(c.high)),
-                };
-                let buffer = atr * p.stop_buffer_atr;
+                if p.confirm_margin_atr.is_some() {
+                    // Do not commit yet: wait for a later candle to prove the
+                    // reaction had follow-through, using already-closed data
+                    // rather than an order that would fill at a fabricated
+                    // price if it rested beyond current market.
+                    state.phase = Phase::AwaitingConfirmation {
+                        level,
+                        trade_dir,
+                        touch_low,
+                        touch_high,
+                        reaction_low: c.low,
+                        reaction_high: c.high,
+                        confirm_extreme: match trade_dir {
+                            Dir::Up => c.high,
+                            Dir::Down => c.low,
+                        },
+                        atr_at_reaction: atr,
+                        bars: 0,
+                    };
+                    return None;
+                }
+
                 let side = match trade_dir {
                     Dir::Up => Side::Buy,
                     Dir::Down => Side::Sell,
                 };
-
-                // Entry rests between the level (0.0) and the reaction
-                // candle's own close (1.0) — the shallower the fraction, the
-                // deeper the retracement required and the fewer signals fill.
-                let entry = level + (c.close - level) * p.entry_fraction;
-                let stop = match side {
-                    Side::Buy => low - buffer,
-                    Side::Sell => high + buffer,
+                let (low, high) = match p.stop_source {
+                    StopSource::TouchOnly => (touch_low, touch_high),
+                    StopSource::TouchAndReaction => (touch_low.min(c.low), touch_high.max(c.high)),
                 };
-                let valid = match side {
-                    Side::Buy => stop < entry,
-                    Side::Sell => stop > entry,
-                };
-                if !valid || entry <= Decimal::ZERO || stop <= Decimal::ZERO {
-                    return None;
-                }
-                let risk = (entry - stop).abs();
-                if risk <= Decimal::ZERO {
-                    return None;
-                }
-                let target = match side {
-                    Side::Buy => entry + risk * p.reward_multiple,
-                    Side::Sell => entry - risk * p.reward_multiple,
-                };
-                if target <= Decimal::ZERO {
-                    return None;
-                }
-                Some(Signal {
-                    symbol: ctx.symbol.clone(),
+                build_signal(
+                    ctx.symbol,
                     side,
-                    entry_price: entry,
-                    stop_price: stop,
-                    target_price: target,
+                    level,
+                    c.close,
+                    low,
+                    high,
                     atr,
-                    signal_candle_open_ms: c.open_time_ms,
-                    breakeven_at_r: p.breakeven_at_r,
-                })
+                    c.open_time_ms,
+                    &p,
+                )
+            }
+            Phase::AwaitingConfirmation {
+                level,
+                trade_dir,
+                touch_low,
+                touch_high,
+                reaction_low,
+                reaction_high,
+                confirm_extreme,
+                atr_at_reaction,
+                bars,
+            } => {
+                let margin = p
+                    .confirm_margin_atr
+                    .expect("only entered while confirm_margin_atr is set");
+                let confirmed = match trade_dir {
+                    Dir::Up => c.close > confirm_extreme + atr_at_reaction * margin,
+                    Dir::Down => c.close < confirm_extreme - atr_at_reaction * margin,
+                };
+                if confirmed {
+                    state.phase = Phase::Idle;
+                    let side = match trade_dir {
+                        Dir::Up => Side::Buy,
+                        Dir::Down => Side::Sell,
+                    };
+                    // TouchOnly stays touch-only regardless of confirmation;
+                    // TouchAndReaction now folds in every candle the setup
+                    // travelled through, including this confirming one.
+                    let (low, high) = match p.stop_source {
+                        StopSource::TouchOnly => (touch_low, touch_high),
+                        StopSource::TouchAndReaction => (
+                            touch_low.min(reaction_low).min(c.low),
+                            touch_high.max(reaction_high).max(c.high),
+                        ),
+                    };
+                    build_signal(
+                        ctx.symbol,
+                        side,
+                        level,
+                        c.close,
+                        low,
+                        high,
+                        atr,
+                        c.open_time_ms,
+                        &p,
+                    )
+                } else if bars + 1 > p.confirm_window {
+                    state.phase = Phase::Idle;
+                    None
+                } else {
+                    state.phase = Phase::AwaitingConfirmation {
+                        level,
+                        trade_dir,
+                        touch_low,
+                        touch_high,
+                        reaction_low,
+                        reaction_high,
+                        confirm_extreme,
+                        atr_at_reaction,
+                        bars: bars + 1,
+                    };
+                    None
+                }
             }
         }
     }
+}
+
+/// Shared entry/stop/target construction for both the immediate path (no
+/// confirmation required) and the confirmed path (a later candle proved
+/// follow-through). `anchor_close` is whichever candle's close the entry
+/// fraction is interpolated toward — the reaction candle's, or the
+/// confirming candle's.
+#[allow(clippy::too_many_arguments)]
+fn build_signal(
+    symbol: &Symbol,
+    side: Side,
+    level: Decimal,
+    anchor_close: Decimal,
+    low: Decimal,
+    high: Decimal,
+    atr: Decimal,
+    signal_candle_open_ms: i64,
+    p: &LevelParams,
+) -> Option<Signal> {
+    let buffer = atr * p.stop_buffer_atr;
+    // Entry rests between the level (0.0) and the anchor candle's own close
+    // (1.0) — the shallower the fraction, the deeper the retracement
+    // required and the fewer signals fill.
+    let entry = level + (anchor_close - level) * p.entry_fraction;
+    let stop = match side {
+        Side::Buy => low - buffer,
+        Side::Sell => high + buffer,
+    };
+    let valid = match side {
+        Side::Buy => stop < entry,
+        Side::Sell => stop > entry,
+    };
+    if !valid || entry <= Decimal::ZERO || stop <= Decimal::ZERO {
+        return None;
+    }
+    let risk = (entry - stop).abs();
+    if risk <= Decimal::ZERO {
+        return None;
+    }
+    let target = match side {
+        Side::Buy => entry + risk * p.reward_multiple,
+        Side::Sell => entry - risk * p.reward_multiple,
+    };
+    if target <= Decimal::ZERO {
+        return None;
+    }
+    Some(Signal {
+        symbol: symbol.clone(),
+        side,
+        entry_price: entry,
+        stop_price: stop,
+        target_price: target,
+        atr,
+        signal_candle_open_ms,
+        breakeven_at_r: p.breakeven_at_r,
+    })
 }
