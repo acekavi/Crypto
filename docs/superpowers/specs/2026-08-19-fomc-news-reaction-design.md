@@ -67,3 +67,46 @@ A trade count near zero, or a result dominated by one or two events, is not a st
 investigate further — it is the correct, expected consequence of a 24-event sample, and ends this line
 without a second pass. Extending to CPI/NFP would be the only legitimate way to get a larger sample,
 and that is blocked on finding a trustworthy calendar source, not on strategy design.
+
+---
+
+# RESULT — REJECTED
+
+Run 2026-08-19. `ReactMode::Both`, 109 trades across 24 events x 8 symbols, fixed 0.25% risk.
+
+## The headline number is misleading — and the pre-registration said to check for exactly this
+
+```
+n=109   win 20.2%   PF 1.447   maxDD 5.1%   net +855
+```
+
+Looks like the best result of the whole session. It is not, because **109 trades is not 109
+independent trials.** Crypto symbols move together, and within almost every FOMC event most symbols
+resolved the same way — four winning together at near-identical PnL, four losing together, within
+minutes of each other. Regrouping by event (the real, independent unit here) rather than by
+individual trade:
+
+```
+10 of 24 EVENTS net positive — worse than a coin flip on breadth.
+```
+
+## Concentration is total, not partial
+
+Four events — 2024-07-31, 2025-05-07, 2025-12-10, 2026-01-28 — supply +1,584.6 between them.
+Total net across all 24 events was +855. **The other 20 events, combined, are net NEGATIVE
+(-729.6).** Four events out of twenty-four account for more than the entire result.
+
+This is exactly the failure mode the pre-registration named in advance: *"no single event or single
+symbol supplying the majority of net PnL — concentration is fatal at this sample size."* Four events
+supplying more than 100% of net is a more extreme version of the same concentration that rejected the
+reaction-strength and D1-bias confluences on `level_reaction` — just starker, because the sample here
+is an order of magnitude smaller.
+
+## Conclusion
+
+**Rejected.** Not "inconclusive due to small sample" — the small-sample framing was already priced
+into the pre-registration, and the result it produced is unambiguous: fewer than half the events were
+profitable, and the aggregate positive number is an artifact of a handful of outsized events, not a
+persistent reaction pattern. Extending to CPI/NFP would triple the event count and could genuinely
+change this, but that is blocked on finding a trustworthy calendar source (see the scope note above),
+not on the strategy design.
