@@ -11,7 +11,7 @@ pub mod traits;
 pub use breakout::{BreakoutParams, BreakoutStrategy};
 pub use ict::{Funnel, IctParams, IctStrategy};
 pub use ict_params_from_config::ict_params_from_config;
-pub use level_reaction::{LevelParams, LevelReactionStrategy, ReactMode};
+pub use level_reaction::{LevelParams, LevelReactionStrategy, ReactMode, StopSource};
 pub use params_from_config::{ParamError, params_from_f64_config};
 pub use pullback::PullbackStrategy;
 pub use reversion::{ReversionParams, ReversionStrategy};

@@ -59,3 +59,29 @@ If nothing clears profit factor 1.0 at the full population, entry and stop mecha
 missing piece — the signal itself (a swing-level break-retest-reaction on M5 crypto) does not carry
 enough information to overcome costs, regardless of where the stop sits or how the entry is timed.
 That would close this strategy for good rather than prompting a third round of parameter search.
+
+---
+
+# RESULT — REJECTED
+
+Run 2026-08-19. 30 cells: entry_fraction {0, 0.25, 0.5, 0.75, 1.0} x stop_source {TouchOnly,
+TouchAndReaction} x stop_buffer_atr {0, 0.25, 0.5}. All fixed at react=Reversal, level_tf=H4,
+risk_pct=0.25% (full signal population, ~6,500-7,300 trades per cell).
+
+**Best cell: entry_fraction=0.75, TouchAndReaction, buffer=0.5 ATR → PF 0.974.** Still losing money.
+No cell in the 30-cell grid clears profit factor 1.0.
+
+## The one real relationship in the grid
+
+PF rises monotonically with `stop_buffer_atr` (0 -> 0.25 -> 0.5) in all 15 entry_fraction x
+stop_source pairs. Consistent, not noise. But win rate is flat at 14.5-15.7% throughout — the wider
+stop reduces premature stop-outs and shrinks losers relative to winners, which is "loses less
+slowly," not "finds edge." The trajectory approaches 1.0 from below without crossing it.
+
+## What this closes
+
+Per the pre-registration, this ends the level-reaction line. Entry depth and stop construction were
+the one lever not yet isolated from the funding-size artifact that got the base version rejected —
+tested here at a fixed 0.25% risk across the full signal population, neither lever produces a
+profitable cell. The signal — a swing-level break, retest and reaction on M5 crypto — does not carry
+enough information to overcome costs, independent of where the stop sits or how deep the entry waits.

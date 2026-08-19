@@ -39,6 +39,16 @@ pub enum ReactMode {
     Both,
 }
 
+/// Which candles the structural stop is measured across.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopSource {
+    /// The touch candle's extreme only — tighter, ignores how far the
+    /// reaction candle itself travelled.
+    TouchOnly,
+    /// Touch and reaction candles combined — the original, wider construction.
+    TouchAndReaction,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dir {
     Up,
@@ -63,6 +73,15 @@ pub struct LevelParams {
     pub react_mode: ReactMode,
     pub reward_multiple: Decimal,
     pub breakeven_at_r: Option<Decimal>,
+    /// Where the entry rests between the level and the reaction candle's
+    /// close. 0.0 = at the level (deepest retracement required, current
+    /// default). 1.0 = at the reaction candle's own close (shallowest, best
+    /// fill rate, worst average price).
+    pub entry_fraction: Decimal,
+    /// Which candles the structural stop is measured across.
+    pub stop_source: StopSource,
+    /// ATR margin added beyond the structural stop, in either direction.
+    pub stop_buffer_atr: Decimal,
     /// Gate entries to the New York session.
     ///
     /// A FIXED UTC window approximating 09:30-16:00 ET, so it is one hour off
@@ -87,6 +106,9 @@ impl LevelParams {
             react_mode: ReactMode::Continuation,
             reward_multiple: Decimal::from(5),
             breakeven_at_r: Some(Decimal::TWO),
+            entry_fraction: Decimal::ZERO,
+            stop_source: StopSource::TouchAndReaction,
+            stop_buffer_atr: Decimal::ZERO,
             session_filter: false,
             ny_open_ms: 13 * 3_600_000 + 30 * 60_000, // 13:30 UTC
             ny_close_ms: 20 * 3_600_000,              // 20:00 UTC
@@ -291,12 +313,24 @@ impl Strategy for LevelReactionStrategy {
                     _ => return None,
                 };
 
-                // The structure the reaction defended, across both candles.
-                let low = touch_low.min(c.low);
-                let high = touch_high.max(c.high);
-                let (side, entry, stop) = match trade_dir {
-                    Dir::Up => (Side::Buy, level, low),
-                    Dir::Down => (Side::Sell, level, high),
+                // The structure the reaction defended.
+                let (low, high) = match p.stop_source {
+                    StopSource::TouchOnly => (touch_low, touch_high),
+                    StopSource::TouchAndReaction => (touch_low.min(c.low), touch_high.max(c.high)),
+                };
+                let buffer = atr * p.stop_buffer_atr;
+                let side = match trade_dir {
+                    Dir::Up => Side::Buy,
+                    Dir::Down => Side::Sell,
+                };
+
+                // Entry rests between the level (0.0) and the reaction
+                // candle's own close (1.0) — the shallower the fraction, the
+                // deeper the retracement required and the fewer signals fill.
+                let entry = level + (c.close - level) * p.entry_fraction;
+                let stop = match side {
+                    Side::Buy => low - buffer,
+                    Side::Sell => high + buffer,
                 };
                 let valid = match side {
                     Side::Buy => stop < entry,
