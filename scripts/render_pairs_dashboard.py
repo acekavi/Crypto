@@ -118,9 +118,35 @@ def load_backtest_summary(params: PairParams) -> dict[str, Any]:
     train = backtest(str(DB_PATH), params, end_ms=split_ms)
     hold = backtest(str(DB_PATH), params, start_ms=split_ms)
     full = backtest(str(DB_PATH), params)
+
     def compact(d: dict[str, Any]) -> dict[str, Any]:
         return {k: d[k] for k in ['trades', 'wins', 'losses', 'win_rate', 'profit_factor', 'net', 'avg_trade', 'max_drawdown_pct']}
-    return {'train': compact(train), 'holdout': compact(hold), 'full': compact(full)}
+
+    equity = 0.0
+    equity_curve = []
+    for trade in full['trades_detail']:
+        equity += float(trade['net'])
+        equity_curve.append(round(equity, 6))
+
+    recent_trades = []
+    for trade in full['trades_detail'][-8:]:
+        recent_trades.append({
+            'entry_ms': trade['entry_ms'],
+            'exit_ms': trade['exit_ms'],
+            'side': trade['side'],
+            'reason': trade['reason'],
+            'entry_z': round(float(trade['entry_z']), 4),
+            'exit_z': round(float(trade['exit_z']), 4),
+            'net': round(float(trade['net']), 6),
+        })
+
+    return {
+        'train': compact(train),
+        'holdout': compact(hold),
+        'full': compact(full),
+        'full_equity_curve': equity_curve,
+        'recent_trades': recent_trades,
+    }
 
 
 def fetch_positions(client: BybitClient) -> list[dict[str, Any]]:
@@ -158,39 +184,120 @@ def fetch_executions_by_symbol(client: BybitClient, symbols: list[str]) -> dict[
     return out
 
 
-def live_metrics_for_pair(params: PairParams, executions_by_symbol: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def fetch_closed_pnl_by_symbol(client: BybitClient, symbols: list[str]) -> dict[str, list[dict[str, Any]]]:
+    out = {}
+    for sym in symbols:
+        res = client.request('GET', '/v5/position/closed-pnl', {'category': 'linear', 'symbol': sym, 'limit': '100'})
+        out[sym] = res['result'].get('list', [])
+    return out
+
+
+def build_live_trade_ledger(params: PairParams, executions_by_symbol: dict[str, list[dict[str, Any]]], closed_pnl_by_symbol: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     slug = pair_slug(params)
-    rows = []
+    bot_exec_rows: list[dict[str, Any]] = []
+    closed_pnl_map: dict[str, dict[str, Any]] = {}
     for sym in (params.leg_a, params.leg_b):
-        rows.extend(executions_by_symbol.get(sym, []))
-    rows = [r for r in rows if (r.get('orderLinkId') or '').startswith(f'{slug}-')]
+        bot_exec_rows.extend([r for r in executions_by_symbol.get(sym, []) if (r.get('orderLinkId') or '').startswith(f'{slug}-')])
+        for row in closed_pnl_by_symbol.get(sym, []):
+            order_id = row.get('orderId')
+            if order_id:
+                closed_pnl_map[order_id] = row
+
+    close_groups: dict[str, dict[str, Any]] = {}
     fee_total = Decimal('0')
-    close_groups: dict[str, Decimal] = defaultdict(lambda: Decimal('0'))
-    last_exec_time = None
-    for row in rows:
+    for row in bot_exec_rows:
         fee_total += Decimal(str(row.get('execFee') or '0'))
-        exec_time = row.get('execTime')
-        if exec_time and (last_exec_time is None or int(exec_time) > int(last_exec_time)):
-            last_exec_time = exec_time
         order_link_id = row.get('orderLinkId') or ''
-        exec_pnl = Decimal(str(row.get('execPnl') or '0'))
-        if f'{slug}-ca-' in order_link_id or f'{slug}-cb-' in order_link_id:
-            group_id = order_link_id.rsplit('-', 1)[-1]
-            close_groups[group_id] += exec_pnl
-    closed_trade_pnls = list(close_groups.values())
-    wins = sum(1 for x in closed_trade_pnls if x > 0)
-    losses = sum(1 for x in closed_trade_pnls if x < 0)
+        if f'{slug}-ca-' not in order_link_id and f'{slug}-cb-' not in order_link_id:
+            continue
+        group_id = order_link_id.rsplit('-', 1)[-1]
+        group = close_groups.setdefault(group_id, {
+            'group_id': group_id,
+            'exit_time': None,
+            'realized_pnl': Decimal('0'),
+            'fees': Decimal('0'),
+            'legs': [],
+            'symbols': set(),
+            'source': 'execution_fallback',
+        })
+        cp = closed_pnl_map.get(row.get('orderId') or '')
+        exec_time = int(row.get('execTime') or 0)
+        updated_time = int(cp.get('updatedTime') or 0) if cp else 0
+        candidate_time = max(exec_time, updated_time)
+        if candidate_time and (group['exit_time'] is None or candidate_time > group['exit_time']):
+            group['exit_time'] = candidate_time
+        group['symbols'].add(row.get('symbol'))
+        if cp:
+            group['source'] = 'closed_pnl'
+            realized = Decimal(str(cp.get('closedPnl') or '0'))
+            fees = Decimal(str(cp.get('openFee') or '0')) + Decimal(str(cp.get('closeFee') or '0'))
+            leg = {
+                'symbol': cp.get('symbol') or row.get('symbol'),
+                'side': cp.get('side') or row.get('side'),
+                'qty': cp.get('closedSize') or row.get('execQty'),
+                'entry_price': cp.get('avgEntryPrice'),
+                'exit_price': cp.get('avgExitPrice'),
+                'pnl': str(realized),
+                'order_id': cp.get('orderId') or row.get('orderId'),
+            }
+        else:
+            realized = Decimal(str(row.get('execPnl') or '0'))
+            fees = Decimal(str(row.get('execFee') or '0'))
+            leg = {
+                'symbol': row.get('symbol'),
+                'side': row.get('side'),
+                'qty': row.get('execQty'),
+                'entry_price': None,
+                'exit_price': row.get('execPrice'),
+                'pnl': str(realized),
+                'order_id': row.get('orderId'),
+            }
+        if not any(existing['order_id'] == leg['order_id'] for existing in group['legs']):
+            group['legs'].append(leg)
+            group['realized_pnl'] += realized
+            group['fees'] += fees
+
+    trades = []
+    for group in close_groups.values():
+        trades.append({
+            'group_id': group['group_id'],
+            'exit_time': group['exit_time'],
+            'realized_pnl': float(group['realized_pnl']),
+            'fees': float(group['fees']),
+            'symbols': sorted(group['symbols']),
+            'source': group['source'],
+            'legs': group['legs'],
+        })
+    trades.sort(key=lambda x: (x['exit_time'] or 0, x['group_id']))
+
+    cumulative = 0.0
+    equity_curve = []
+    wins = losses = 0
+    for trade in trades:
+        cumulative += trade['realized_pnl']
+        equity_curve.append(round(cumulative, 6))
+        if trade['realized_pnl'] > 0:
+            wins += 1
+        elif trade['realized_pnl'] < 0:
+            losses += 1
+
     closed_trades = wins + losses
     return {
-        'execution_rows': len(rows),
+        'execution_rows': len(bot_exec_rows),
         'closed_trades': closed_trades,
         'wins': wins,
         'losses': losses,
         'win_rate': (wins / closed_trades) if closed_trades else None,
-        'realized_pnl': str(sum(closed_trade_pnls, Decimal('0'))),
-        'total_exec_fee': str(fee_total),
-        'last_exec_time': last_exec_time,
+        'realized_pnl': round(cumulative, 6),
+        'total_exec_fee': round(float(fee_total), 6),
+        'last_exec_time': trades[-1]['exit_time'] if trades else None,
+        'recent_closed_trades': trades[-8:],
+        'live_equity_curve': equity_curve,
     }
+
+
+def live_metrics_for_pair(params: PairParams, executions_by_symbol: dict[str, list[dict[str, Any]]], closed_pnl_by_symbol: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    return build_live_trade_ledger(params, executions_by_symbol, closed_pnl_by_symbol)
 
 
 def render_html(data: dict[str, Any]) -> str:
@@ -243,16 +350,20 @@ def render_html(data: dict[str, Any]) -> str:
     .chip.warn { color: var(--warn); border-color: rgba(255,204,102,.35); }
     .chip.bad { color: var(--bad); border-color: rgba(255,107,122,.35); }
     .stats { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; margin-top: 16px; }
+    .charts { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; margin-top: 14px; }
+    .chart { background: rgba(255,255,255,.02); border: 1px solid rgba(124,178,255,.12); border-radius: 14px; padding: 12px; }
+    .chart svg { width: 100%; height: 90px; display: block; }
     .stat { background: rgba(255,255,255,.02); border: 1px solid rgba(124,178,255,.12); border-radius: 14px; padding: 14px; }
     .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
     .value { margin-top: 8px; font-size: 24px; font-weight: 800; letter-spacing: -.03em; }
     .small { font-size: 13px; color: var(--muted); }
+    .muted-box { background: rgba(255,255,255,.02); border: 1px solid rgba(124,178,255,.12); border-radius: 14px; padding: 12px; }
     table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 13px; }
     th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid rgba(124,178,255,.12); vertical-align: top; }
     th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
     pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #c6d2ff; }
     .footer { margin-top: 18px; color: var(--muted); font-size: 12px; }
-    @media (max-width: 1100px) { .span-6 { grid-column: span 12; } .stats { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+    @media (max-width: 1100px) { .span-6 { grid-column: span 12; } .stats { grid-template-columns: repeat(2, minmax(0,1fr)); } .charts { grid-template-columns: 1fr; } }
     @media (max-width: 640px) { .stats { grid-template-columns: 1fr; } .wrap { padding: 14px; } .title { font-size: 24px; } }
   </style>
 </head>
@@ -265,6 +376,24 @@ def render_html(data: dict[str, Any]) -> str:
     const fmtRaw = (v) => v === null || v === undefined || v === '' ? '—' : String(v);
     const badge = (kind, text) => `<span class="chip ${kind}">${text}</span>`;
     const btRow = (label, s) => `<tr><td>${label}</td><td>${s.trades}</td><td>${fmtPct(s.win_rate)}</td><td>${fmtNum(s.profit_factor, 3)}</td><td>${fmtNum(s.net, 4)}</td><td>${fmtNum(s.max_drawdown_pct, 2)}%</td></tr>`;
+    const sparkline = (values, stroke) => {
+      if (!values || !values.length) return `<div class="small">No data yet.</div>`;
+      const width = 320, height = 90, pad = 6;
+      const min = Math.min(...values), max = Math.max(...values);
+      const span = Math.max(max - min, 1e-9);
+      const pts = values.map((v, i) => {
+        const x = pad + (i * (width - pad * 2)) / Math.max(values.length - 1, 1);
+        const y = height - pad - ((v - min) / span) * (height - pad * 2);
+        return `${x.toFixed(2)},${y.toFixed(2)}`;
+      }).join(' ');
+      const zeroY = min <= 0 && max >= 0 ? height - pad - ((0 - min) / span) * (height - pad * 2) : null;
+      return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">${zeroY === null ? '' : `<line x1="0" y1="${zeroY.toFixed(2)}" x2="${width}" y2="${zeroY.toFixed(2)}" stroke="rgba(152,166,214,.25)" stroke-dasharray="4 4" />`}<polyline fill="none" stroke="${stroke}" stroke-width="3" points="${pts}" stroke-linecap="round" stroke-linejoin="round" /></svg>`;
+    };
+    const closedTradesTable = (rows) => rows.length ? `
+      <table>
+        <thead><tr><th>Exit Time</th><th>PnL</th><th>Fees</th><th>Source</th><th>Legs</th></tr></thead>
+        <tbody>${rows.slice().reverse().map(r => `<tr><td>${fmtRaw(r.exit_time)}</td><td>${fmtNum(r.realized_pnl, 4)}</td><td>${fmtNum(r.fees, 4)}</td><td>${fmtRaw(r.source)}</td><td>${r.legs.map(leg => `${leg.symbol} ${leg.side} qty=${fmtRaw(leg.qty)} pnl=${fmtRaw(leg.pnl)}`).join('<br>')}</td></tr>`).join('')}</tbody>
+      </table>` : `<div class="muted-box small">No closed live trades yet for this bot. The explicit ledger is wired up, but there are no real close rows to render yet.</div>`;
     const positionTable = (rows) => rows.length ? `
       <table>
         <thead><tr><th>Symbol</th><th>Side</th><th>Size</th><th>Avg Price</th><th>Unrealized PnL</th><th>Updated</th></tr></thead>
@@ -293,6 +422,16 @@ def render_html(data: dict[str, Any]) -> str:
             <div class="stat"><div class="label">Live closed trades</div><div class="value">${fmtRaw(bot.live_metrics.closed_trades)}</div></div>
             <div class="stat"><div class="label">Backtest full win rate</div><div class="value">${fmtPct(bot.backtest.full.win_rate)}</div></div>
           </div>
+          <div class="charts">
+            <div class="chart">
+              <div class="label">Backtest equity curve</div>
+              ${sparkline(bot.backtest.full_equity_curve, '#7cb2ff')}
+            </div>
+            <div class="chart">
+              <div class="label">Live realized PnL curve</div>
+              ${sparkline(bot.live_metrics.live_equity_curve, '#35d49a')}
+            </div>
+          </div>
           <table>
             <thead><tr><th>Metric</th><th>Value</th><th>Metric</th><th>Value</th></tr></thead>
             <tbody>
@@ -310,6 +449,8 @@ def render_html(data: dict[str, Any]) -> str:
               ${btRow('Full', bot.backtest.full)}
             </tbody>
           </table>
+          <div class="small" style="margin:14px 0 8px;">Recent live closed trades</div>
+          ${closedTradesTable(bot.live_metrics.recent_closed_trades)}
           <div class="small" style="margin:14px 0 8px;">Recent log lines</div>
           <pre>${bot.recent_logs.map(x => x.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))).join('\n') || 'No log lines yet.'}</pre>
         </div>
@@ -345,6 +486,7 @@ def main() -> None:
     positions = fetch_positions(client)
     open_orders = fetch_open_orders_by_symbol(client, unique_symbols)
     executions = fetch_executions_by_symbol(client, unique_symbols)
+    closed_pnl = fetch_closed_pnl_by_symbol(client, unique_symbols)
     symbol_counts = Counter(sym for p in PAIRS for sym in (p['params'].leg_a, p['params'].leg_b))
     data = {
         'generated_at_epoch': time.time(),
@@ -376,7 +518,7 @@ def main() -> None:
             'open_orders': pair_orders,
             'recent_logs': tail_lines(item['log_path'], 10),
             'backtest': json_ready(load_backtest_summary(params)),
-            'live_metrics': live_metrics_for_pair(params, executions),
+            'live_metrics': live_metrics_for_pair(params, executions, closed_pnl),
         })
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(render_html(data))
