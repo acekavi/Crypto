@@ -2017,6 +2017,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pairs"
+version = "0.1.0"
+dependencies = [
+ "botcore",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
