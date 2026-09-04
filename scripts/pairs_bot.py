@@ -91,6 +91,7 @@ class RuntimeState:
     last_loop_wall_time: float | None = None
     last_seen_z: float | None = None
     last_seen_signal: str | None = None
+    last_guard_reason: str | None = None
 
     @classmethod
     def from_file(cls, path: Path, params: PairParams) -> "RuntimeState":
@@ -107,6 +108,7 @@ class RuntimeState:
             last_loop_wall_time=data.get("last_loop_wall_time"),
             last_seen_z=data.get("last_seen_z"),
             last_seen_signal=data.get("last_seen_signal"),
+            last_guard_reason=data.get("last_guard_reason"),
         )
 
     def save(self, path: Path) -> None:
@@ -117,6 +119,7 @@ class RuntimeState:
             "last_loop_wall_time": self.last_loop_wall_time,
             "last_seen_z": self.last_seen_z,
             "last_seen_signal": self.last_seen_signal,
+            "last_guard_reason": self.last_guard_reason,
         }
         path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -441,6 +444,67 @@ def configure_logging(log_file: str | None) -> None:
     )
 
 
+def should_defer_to_higher_priority(current_signal: PairSide | None, current_symbols: set[str], latest_ms: int | None, higher_peers: list[dict]) -> str | None:
+    if current_signal is None:
+        return None
+    for peer in higher_peers:
+        if not current_symbols.intersection(peer['shared_symbols']):
+            continue
+        if peer.get('has_local_position'):
+            return f"deferred to higher-priority {peer['display_name']} local position on shared symbol"
+        if latest_ms is not None and peer.get('latest_ms') == latest_ms and peer.get('signal'):
+            return f"deferred to higher-priority {peer['display_name']} same bar signal={peer['signal']}"
+    return None
+
+
+BOT_PROFILES = {
+    'doge_xrp': {
+        'display_name': 'DOGE/XRP',
+        'priority': 100,
+        'params': PairParams(),
+        'state_path': '/home/acekavi/Projects/Crypto/data/pairs_bot_state.json',
+        'shared_symbols': {'DOGEUSDT', 'XRPUSDT'},
+        'higher_priority_peers': [],
+    },
+    'link_xrp': {
+        'display_name': 'LINK/XRP',
+        'priority': 50,
+        'params': PairParams(leg_a='LINKUSDT', leg_b='XRPUSDT', timeframe='60', rolling_window=240, entry_z=3.5, stop_z=4.5, target_z=0.5),
+        'state_path': '/home/acekavi/Projects/Crypto/data/pairs_bot_link_xrp_state.json',
+        'shared_symbols': {'LINKUSDT', 'XRPUSDT'},
+        'higher_priority_peers': ['doge_xrp'],
+    },
+}
+
+
+def higher_priority_snapshot(client: BybitClient, bot_id: str, latest_ms: int | None) -> list[dict]:
+    profile = BOT_PROFILES.get(bot_id)
+    if not profile:
+        return []
+    peers = []
+    for peer_id in profile['higher_priority_peers']:
+        peer = BOT_PROFILES[peer_id]
+        peer_params = peer['params']
+        peer_state = RuntimeState.from_file(Path(peer['state_path']), peer_params)
+        peer_latest_ms = None
+        peer_signal = None
+        try:
+            peer_latest_ms, _peer_z, peer_sig = compute_latest_live_signal(client, peer_params)
+            peer_signal = peer_sig.value if peer_sig else None
+        except Exception:
+            peer_latest_ms = peer_state.last_bar_ms
+            peer_signal = peer_state.last_seen_signal
+        peers.append({
+            'display_name': peer['display_name'],
+            'priority': peer['priority'],
+            'shared_symbols': set(peer['shared_symbols']),
+            'has_local_position': peer_state.position is not None,
+            'latest_ms': peer_latest_ms if peer_latest_ms is not None else latest_ms,
+            'signal': peer_signal,
+        })
+    return peers
+
+
 def aggressive_limit_price(side: str, bid: Decimal, ask: Decimal, tick: Decimal) -> Decimal:
     if side == "Buy":
         base = ask + tick * Decimal("5")
@@ -589,13 +653,13 @@ def close_pair_position(client: BybitClient, params: PairParams, position: Posit
         raise RuntimeError(f"close did not fully fill: a={a_state.get('orderStatus')} b={b_state.get('orderStatus')}")
 
 
-def run_live(params: PairParams, env_path: str, state_path: str, loop_seconds: int) -> None:
+def run_live(params: PairParams, env_path: str, state_path: str, loop_seconds: int, bot_id: str) -> None:
     state_file = Path(state_path)
     state = RuntimeState.from_file(state_file, params)
     client = BybitClient(env_path=env_path)
     engine = PairSignalEngine(params)
 
-    logging.info("starting pair bot pair=%s rr=%.2f notional_per_leg=%s", params.display_pair(), params.reward_risk_ratio(), params.per_leg_notional_usdt)
+    logging.info("starting pair bot pair=%s rr=%.2f notional_per_leg=%s bot_id=%s", params.display_pair(), params.reward_risk_ratio(), params.per_leg_notional_usdt, bot_id)
     while True:
         try:
             latest_ms, latest_z, signal = compute_latest_live_signal(client, params)
@@ -617,10 +681,22 @@ def run_live(params: PairParams, env_path: str, state_path: str, loop_seconds: i
                 continue
 
             if state.position is None:
+                state.last_guard_reason = None
                 if signal is not None:
-                    state.position = place_pair_entry(client, params, signal, latest_z, latest_ms)
-                    logging.info("pair entry filled side=%s", state.position.side.value)
+                    guard_reason = should_defer_to_higher_priority(
+                        current_signal=signal,
+                        current_symbols={params.leg_a, params.leg_b},
+                        latest_ms=latest_ms,
+                        higher_peers=higher_priority_snapshot(client, bot_id, latest_ms),
+                    )
+                    if guard_reason is not None:
+                        state.last_guard_reason = guard_reason
+                        logging.info("entry skipped reason=%s", guard_reason)
+                    else:
+                        state.position = place_pair_entry(client, params, signal, latest_z, latest_ms)
+                        logging.info("pair entry filled side=%s", state.position.side.value)
             else:
+                state.last_guard_reason = None
                 age_bars = max(0, (latest_ms - state.position.opened_at_ms) // TF_MS)
                 reason = engine.exit_reason(state.position.side, latest_z, int(age_bars))
                 logging.info("position open age_bars=%s exit_reason=%s", age_bars, reason)
@@ -648,6 +724,7 @@ def main() -> None:
     p_live.add_argument("--state", default="/home/acekavi/Projects/Crypto/data/pairs_bot_state.json")
     p_live.add_argument("--loop-seconds", type=int, default=60)
     p_live.add_argument("--log-file", default="/home/acekavi/Projects/Crypto/logs/pairs-bot.log")
+    p_live.add_argument("--bot-id", default="doge_xrp")
 
     for subparser in (p_backtest, p_live):
         subparser.add_argument("--leg-a", default="DOGEUSDT")
@@ -683,7 +760,7 @@ def main() -> None:
         return
 
     if args.cmd == "live":
-        run_live(params, args.env, args.state, args.loop_seconds)
+        run_live(params, args.env, args.state, args.loop_seconds, args.bot_id)
 
 
 if __name__ == "__main__":

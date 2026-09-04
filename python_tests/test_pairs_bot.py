@@ -16,6 +16,7 @@ from scripts.pairs_bot import (
     json_ready,
     pair_slug,
     params_from_args,
+    should_defer_to_higher_priority,
 )
 
 
@@ -103,6 +104,38 @@ class PairSignalEngineTests(unittest.TestCase):
         self.assertEqual(p.leg_b, 'XRPUSDT')
         self.assertEqual(p.per_leg_notional_usdt, Decimal('35'))
         self.assertAlmostEqual(p.reward_risk_ratio(), 3.0)
+
+    def test_lower_priority_bot_defers_when_higher_priority_has_local_position(self):
+        reason = should_defer_to_higher_priority(
+            current_signal=PairSide.SHORT_SPREAD,
+            current_symbols={'LINKUSDT', 'XRPUSDT'},
+            latest_ms=100,
+            higher_peers=[{
+                'display_name': 'DOGE/XRP',
+                'shared_symbols': {'DOGEUSDT', 'XRPUSDT'},
+                'has_local_position': True,
+                'latest_ms': 100,
+                'signal': None,
+            }],
+        )
+        self.assertIn('DOGE/XRP', reason)
+        self.assertIn('local position', reason)
+
+    def test_lower_priority_bot_defers_when_higher_priority_has_same_bar_signal(self):
+        reason = should_defer_to_higher_priority(
+            current_signal=PairSide.LONG_SPREAD,
+            current_symbols={'LINKUSDT', 'XRPUSDT'},
+            latest_ms=200,
+            higher_peers=[{
+                'display_name': 'DOGE/XRP',
+                'shared_symbols': {'DOGEUSDT', 'XRPUSDT'},
+                'has_local_position': False,
+                'latest_ms': 200,
+                'signal': 'short_spread',
+            }],
+        )
+        self.assertIn('same bar', reason)
+        self.assertIn('DOGE/XRP', reason)
 
 
 if __name__ == '__main__':

@@ -12,6 +12,9 @@
 *.db-wal
 /data
 /logs
+/dashboard/pairs-dashboard.html
+**/__pycache__/
+*.pyc
 
 # graphify knowledge base — regenerable, contains machine-specific absolute paths
 graphify-out/
