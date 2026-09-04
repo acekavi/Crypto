@@ -16,7 +16,7 @@ Every task's requirements implicitly include this section.
 
 - **Limit orders only — no market orders anywhere, including unwinds.** An orphaned leg is flattened with an aggressive reduce-only *limit* on an escalating price ladder. If the ladder is exhausted, halt; never fall back to a market order.
 - Leg orders are `timeInForce: "GTC"`, `orderType: "Limit"`, `category: "linear"`, `positionIdx: 0`. Never `PostOnly` (rejected at a crossing price), never `IOC` (a partial fill that cancels the remainder leaves the pair mismatched).
-- `rust_decimal::Decimal` for all money and quantity. `f64` only inside spread/z-score statistics, matching the Python it must be bit-comparable to.
+- `rust_decimal::Decimal` for all money, quantity, and **rates** (fees, risk fractions). `f64` only inside spread/z-score statistics, matching the Python it must be bit-comparable to. A rate knob is not a statistic: `fee_per_leg` and `risk_pct_of_equity` are both `Decimal`, and no code path may convert either through `f64`.
 - Rolling statistics use **population** variance (`/ window`, not `/ (window - 1)`) with a `max(var, 1e-12)` floor, over a window that **excludes the current bar**.
 - Exit-reason precedence stays `breakeven → time → target → stop`. Do not "fix" it: every exit resolves on the same bar at the same price, so the order changes only the label.
 - Edition/rust-version come from `[workspace.package]`: `edition.workspace = true`, `rust-version.workspace = true`. Shared deps use `.workspace = true`.
@@ -462,7 +462,7 @@ mod tests {
             stop_z: 4.5,
             target_z: 0.5,
             max_hold_bars: 72,
-            fee_per_leg: 0.0002,
+            fee_per_leg: dec!(0.0002),
             per_leg_notional_usdt: dec!(25),
             risk_pct_of_equity: dec!(0.02),
             max_notional_multiple_of_equity: dec!(1),
@@ -583,7 +583,7 @@ mod tests {
             dec!(1),
             dec!(10.3),
             dec!(0.99),
-            0.0002,
+            dec!(0.0002),
         );
         assert!(pnl <= dec!(0), "pnl fraction was {pnl}");
         assert_eq!(
@@ -610,7 +610,7 @@ mod tests {
             dec!(100),
             dec!(100),
             dec!(100),
-            0.0002,
+            dec!(0.0002),
         );
         assert_eq!(pnl, dec!(-0.0008));
     }
@@ -705,7 +705,7 @@ pub struct PairParams {
     pub stop_z: f64,
     pub target_z: f64,
     pub max_hold_bars: i64,
-    pub fee_per_leg: f64,
+    pub fee_per_leg: Decimal,
     /// Used only when `risk_pct_of_equity` is zero, which is the backtest's
     /// fixed-size mode. Every live profile runs risk-based sizing.
     pub per_leg_notional_usdt: Decimal,
@@ -856,7 +856,7 @@ pub fn unrealized_pnl_fraction(
     b_entry: Decimal,
     a_now: Decimal,
     b_now: Decimal,
-    fee_per_leg: f64,
+    fee_per_leg: Decimal,
 ) -> Decimal {
     let a_ret = a_now / a_entry - Decimal::ONE;
     let b_ret = b_now / b_entry - Decimal::ONE;
@@ -864,7 +864,10 @@ pub fn unrealized_pnl_fraction(
         PairSide::LongSpread => a_ret - b_ret,
         PairSide::ShortSpread => b_ret - a_ret,
     };
-    let fees = Decimal::try_from(4.0 * fee_per_leg).unwrap_or(Decimal::ZERO);
+    // No f64 conversion and so no fallback: a silent zero-fee substitution
+    // would overstate PnL and make the breakeven exit fire late, which is the
+    // unsafe direction for a risk-control input.
+    let fees = Decimal::from(4) * fee_per_leg;
     gross - fees
 }
 ```
@@ -936,7 +939,7 @@ mod tests {
             stop_z: 4.5,
             target_z: 0.5,
             max_hold_bars: 72,
-            fee_per_leg: 0.0002,
+            fee_per_leg: dec!(0.0002),
             per_leg_notional_usdt: dec!(25),
             risk_pct_of_equity: dec!(0.02),
             max_notional_multiple_of_equity: dec!(1),
@@ -2406,7 +2409,7 @@ fn params() -> PairParams {
         stop_z: 4.0,
         target_z: 0.0,
         max_hold_bars: 48,
-        fee_per_leg: 0.0002,
+        fee_per_leg: dec!(0.0002),
         per_leg_notional_usdt: dec!(25),
         risk_pct_of_equity: dec!(0.03),
         max_notional_multiple_of_equity: dec!(1),
@@ -4163,7 +4166,7 @@ Validation, all of it returning `ConfigError::Invalid(String)`:
 - `max_notional_multiple_of_equity > 0`;
 - `unwind_ladder` non-empty and strictly increasing (a ladder that does not widen is a retry loop, not an escalation);
 - `leg_a != leg_b`;
-- every `f64` knob finite.
+- every `f64` knob finite. `fee_per_leg` is parsed from its TOML float and converted to `Decimal` at load via the string form (`Decimal::from_str(&v.to_string())`), the same conversion `sizing` uses for sigma — never `Decimal::try_from(f64)`, which rounds differently.
 
 Log a `warn!` — not an error — when two bots share a symbol: that is legal and is what `PortfolioGuard` exists for, but it should never happen silently.
 
