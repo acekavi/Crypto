@@ -5,8 +5,18 @@ from decimal import Decimal
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
-from scripts.pairs_bot import PairParams, PairSignalEngine, PairSide, RuntimeState, rolling_zscores, json_ready
+from scripts.pairs_bot import (
+    PairParams,
+    PairSignalEngine,
+    PairSide,
+    RuntimeState,
+    rolling_zscores,
+    json_ready,
+    pair_slug,
+    params_from_args,
+)
 
 
 class RollingZScoresTests(unittest.TestCase):
@@ -70,6 +80,29 @@ class PairSignalEngineTests(unittest.TestCase):
             self.assertEqual(loaded.last_loop_wall_time, 456.0)
             self.assertEqual(loaded.last_seen_z, 1.25)
             self.assertEqual(loaded.last_seen_signal, 'x')
+
+    def test_pair_slug_uses_symbols_without_quote_asset(self):
+        self.assertEqual(pair_slug(PairParams()), 'doge_xrp')
+        self.assertEqual(pair_slug(PairParams(leg_a='LINKUSDT', leg_b='XRPUSDT')), 'link_xrp')
+
+    def test_params_from_args_overrides_pair_and_thresholds(self):
+        args = SimpleNamespace(
+            leg_a='LINKUSDT',
+            leg_b='XRPUSDT',
+            timeframe='60',
+            rolling_window=240,
+            entry_z=3.5,
+            stop_z=4.5,
+            target_z=0.5,
+            max_hold_bars=72,
+            fee_per_leg=0.0002,
+            per_leg_notional_usdt='35',
+        )
+        p = params_from_args(args)
+        self.assertEqual(p.leg_a, 'LINKUSDT')
+        self.assertEqual(p.leg_b, 'XRPUSDT')
+        self.assertEqual(p.per_leg_notional_usdt, Decimal('35'))
+        self.assertAlmostEqual(p.reward_risk_ratio(), 3.0)
 
 
 if __name__ == '__main__':

@@ -45,6 +45,30 @@ class PairParams:
     def reward_risk_ratio(self) -> float:
         return abs(self.entry_z - self.target_z) / abs(self.stop_z - self.entry_z)
 
+    def display_pair(self) -> str:
+        return f"{self.leg_a}/{self.leg_b}"
+
+
+def pair_slug(params: PairParams) -> str:
+    def norm(symbol: str) -> str:
+        return symbol.removesuffix("USDT").lower()
+    return f"{norm(params.leg_a)}_{norm(params.leg_b)}"
+
+
+def params_from_args(args: argparse.Namespace) -> PairParams:
+    return PairParams(
+        leg_a=args.leg_a,
+        leg_b=args.leg_b,
+        timeframe=args.timeframe,
+        rolling_window=args.rolling_window,
+        entry_z=args.entry_z,
+        stop_z=args.stop_z,
+        target_z=args.target_z,
+        max_hold_bars=args.max_hold_bars,
+        fee_per_leg=args.fee_per_leg,
+        per_leg_notional_usdt=Decimal(str(args.per_leg_notional_usdt)),
+    )
+
 
 @dataclass
 class PositionState:
@@ -476,6 +500,7 @@ def wait_for_terminal_state(client: BybitClient, symbol: str, order_link_id: str
 
 
 def place_pair_entry(client: BybitClient, params: PairParams, side: PairSide, latest_z: float, opened_at_ms: int) -> PositionState:
+    slug = pair_slug(params)
     a_ticker = client.ticker(params.leg_a)
     b_ticker = client.ticker(params.leg_b)
     a_instr = client.instrument(params.leg_a)
@@ -492,8 +517,8 @@ def place_pair_entry(client: BybitClient, params: PairParams, side: PairSide, la
     b_qty = sized_qty(params.per_leg_notional_usdt, b_ticker["last"], b_instr["qty_step"], b_instr["min_qty"], b_instr["min_notional"])
 
     ts = int(time.time())
-    a_link = f"pair-a-{ts}"
-    b_link = f"pair-b-{ts}"
+    a_link = f"{slug}-a-{ts}"
+    b_link = f"{slug}-b-{ts}"
 
     logging.info("placing pair entry side=%s z=%.4f", side.value, latest_z)
     a_res = client.place_limit_order(symbol=params.leg_a, side=a_side, qty=fmt_decimal(a_qty), price=fmt_decimal(a_price), reduce_only=False, order_link_id=a_link)
@@ -535,6 +560,7 @@ def place_pair_entry(client: BybitClient, params: PairParams, side: PairSide, la
 
 
 def close_pair_position(client: BybitClient, params: PairParams, position: PositionState) -> None:
+    slug = pair_slug(params)
     a_ticker = client.ticker(params.leg_a)
     b_ticker = client.ticker(params.leg_b)
     a_instr = client.instrument(params.leg_a)
@@ -548,8 +574,8 @@ def close_pair_position(client: BybitClient, params: PairParams, position: Posit
     a_price = aggressive_limit_price(a_close_side, a_ticker["bid1"], a_ticker["ask1"], a_instr["tick_size"])
     b_price = aggressive_limit_price(b_close_side, b_ticker["bid1"], b_ticker["ask1"], b_instr["tick_size"])
     ts = int(time.time())
-    a_link = f"pair-close-a-{ts}"
-    b_link = f"pair-close-b-{ts}"
+    a_link = f"{slug}-ca-{ts}"
+    b_link = f"{slug}-cb-{ts}"
 
     logging.info("closing pair position side=%s", position.side.value)
     client.place_limit_order(symbol=params.leg_a, side=a_close_side, qty=position.a_qty, price=fmt_decimal(a_price), reduce_only=True, order_link_id=a_link)
@@ -563,14 +589,13 @@ def close_pair_position(client: BybitClient, params: PairParams, position: Posit
         raise RuntimeError(f"close did not fully fill: a={a_state.get('orderStatus')} b={b_state.get('orderStatus')}")
 
 
-def run_live(env_path: str, state_path: str, loop_seconds: int) -> None:
-    params = PairParams()
+def run_live(params: PairParams, env_path: str, state_path: str, loop_seconds: int) -> None:
     state_file = Path(state_path)
     state = RuntimeState.from_file(state_file, params)
     client = BybitClient(env_path=env_path)
     engine = PairSignalEngine(params)
 
-    logging.info("starting pair bot pair=%s/%s rr=%.2f notional_per_leg=%s", params.leg_a, params.leg_b, params.reward_risk_ratio(), params.per_leg_notional_usdt)
+    logging.info("starting pair bot pair=%s rr=%.2f notional_per_leg=%s", params.display_pair(), params.reward_risk_ratio(), params.per_leg_notional_usdt)
     while True:
         try:
             latest_ms, latest_z, signal = compute_latest_live_signal(client, params)
@@ -611,7 +636,7 @@ def run_live(env_path: str, state_path: str, loop_seconds: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="DOGE/XRP statistical arbitrage research harness and testnet bot")
+    parser = argparse.ArgumentParser(description="Pairs statistical arbitrage research harness and testnet bot")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_backtest = sub.add_parser("backtest")
@@ -624,11 +649,23 @@ def main() -> None:
     p_live.add_argument("--loop-seconds", type=int, default=60)
     p_live.add_argument("--log-file", default="/home/acekavi/Projects/Crypto/logs/pairs-bot.log")
 
+    for subparser in (p_backtest, p_live):
+        subparser.add_argument("--leg-a", default="DOGEUSDT")
+        subparser.add_argument("--leg-b", default="XRPUSDT")
+        subparser.add_argument("--timeframe", default="60")
+        subparser.add_argument("--rolling-window", type=int, default=240)
+        subparser.add_argument("--entry-z", type=float, default=3.5)
+        subparser.add_argument("--stop-z", type=float, default=4.5)
+        subparser.add_argument("--target-z", type=float, default=0.5)
+        subparser.add_argument("--max-hold-bars", type=int, default=72)
+        subparser.add_argument("--fee-per-leg", type=float, default=0.0002)
+        subparser.add_argument("--per-leg-notional-usdt", default="25")
+
     args = parser.parse_args()
     configure_logging(getattr(args, "log_file", None))
+    params = params_from_args(args)
 
     if args.cmd == "backtest":
-        params = PairParams()
         times, _, _ = load_pair_series_from_db(args.db, params)
         split_idx = int(len(times) * args.split_pct)
         split_ms = times[split_idx]
@@ -646,7 +683,7 @@ def main() -> None:
         return
 
     if args.cmd == "live":
-        run_live(args.env, args.state, args.loop_seconds)
+        run_live(params, args.env, args.state, args.loop_seconds)
 
 
 if __name__ == "__main__":
