@@ -17,8 +17,8 @@ if str(PROJECT) not in sys.path:
 
 from scripts.pairs_bot import (  # noqa: E402
     BybitClient,
-    PairParams,
     RuntimeState,
+    active_bot_profiles,
     backtest,
     json_ready,
     load_pair_series_from_db,
@@ -29,29 +29,8 @@ from scripts.pairs_bot import (  # noqa: E402
 
 DB_PATH = PROJECT / 'data/history.db'
 OUTPUT_PATH = PROJECT / 'dashboard/pairs-dashboard.html'
-LOG_DIR = PROJECT / 'logs'
-STATE_DIR = PROJECT / 'data'
 ENV_PATH = PROJECT / '.env'
-PAIRS = [
-    {
-        'name': 'DOGE/XRP',
-        'bot_id': 'doge_xrp',
-        'priority': 100,
-        'service': 'crypto-bot.service',
-        'params': PairParams(),
-        'state_path': STATE_DIR / 'pairs_bot_state.json',
-        'log_path': LOG_DIR / 'pairs-bot.log',
-    },
-    {
-        'name': 'LINK/XRP',
-        'bot_id': 'link_xrp',
-        'priority': 50,
-        'service': 'crypto-bot-link-xrp.service',
-        'params': PairParams(leg_a='LINKUSDT', leg_b='XRPUSDT', timeframe='60', rolling_window=240, entry_z=3.5, stop_z=4.5, target_z=0.5),
-        'state_path': STATE_DIR / 'pairs_bot_link_xrp_state.json',
-        'log_path': LOG_DIR / 'pairs-bot-link-xrp.log',
-    },
-]
+PAIRS = active_bot_profiles()
 
 
 def run(cmd: list[str]) -> tuple[int, str]:
@@ -461,7 +440,7 @@ def render_html(data: dict[str, Any]) -> str:
       <header class="header">
         <div class="title">Pairs Bot Dashboard</div>
         <div class="sub">Monitor surface. Auto-regenerated every 5 minutes and auto-reloads in-browser every 5 minutes. Generated at ${data.generated_at_human}.</div>
-        ${data.shared_symbol_risk ? `<div class="warning"><strong>Shared-symbol risk:</strong> both bots use <code>XRPUSDT</code> on the same Bybit testnet account. Bybit nets positions by symbol, so account-level XRP exposure can interfere across bots. <strong>Priority policy:</strong> DOGE/XRP has priority 100 and LINK/XRP has priority 50. LINK/XRP defers when DOGE/XRP already has a local XRP position or a same-bar entry signal. Local bot state and account net positions are shown separately on purpose.</div>` : ''}
+        ${data.shared_symbol_risk ? `<div class="warning"><strong>Shared-symbol risk:</strong> the configured portfolio reuses at least one symbol across bots on the same Bybit testnet account. Bybit nets positions by symbol, so overlapping legs can interfere across bots. Local bot state and account net positions are shown separately on purpose.</div>` : ''}
       </header>
       <main class="grid">
         <section class="card span-12">

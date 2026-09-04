@@ -1,0 +1,22 @@
+# AAVE/ETH statistical arbitrage testnet bot
+
+[Unit]
+Description=Crypto pairs bot (Bybit testnet, AAVE/ETH statistical arbitrage)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/var/home/acekavi/Projects/Crypto
+EnvironmentFile=/var/home/acekavi/Projects/Crypto/.env
+ExecStart=/usr/bin/python3 /var/home/acekavi/Projects/Crypto/scripts/pairs_bot.py live --env /var/home/acekavi/Projects/Crypto/.env --state /var/home/acekavi/Projects/Crypto/data/pairs_bot_aave_eth_state.json --loop-seconds 60 --log-file /var/home/acekavi/Projects/Crypto/logs/pairs-bot-aave-eth.log --bot-id aave_eth --leg-a AAVEUSDT --leg-b ETHUSDT --timeframe 60 --rolling-window 180 --entry-z 3.0 --stop-z 4.0 --target-z 0.0 --max-hold-bars 48 --fee-per-leg 0.0002 --per-leg-notional-usdt 25 --risk-pct-of-equity 0.03 --cap-per-leg-to-available-equity true --enable-breakeven false --breakeven-r-multiple 2
+Restart=always
+RestartSec=10s
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crypto-bot-aave-eth
+
+[Install]
+WantedBy=default.target

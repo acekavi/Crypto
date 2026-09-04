@@ -41,6 +41,10 @@ class PairParams:
     max_hold_bars: int = 72
     fee_per_leg: float = 0.0002
     per_leg_notional_usdt: Decimal = Decimal("25")
+    risk_pct_of_equity: Decimal = Decimal("0.02")
+    cap_per_leg_to_available_equity: bool = True
+    enable_breakeven: bool = True
+    breakeven_r_multiple: Decimal = Decimal("2")
 
     def reward_risk_ratio(self) -> float:
         return abs(self.entry_z - self.target_z) / abs(self.stop_z - self.entry_z)
@@ -55,7 +59,90 @@ def pair_slug(params: PairParams) -> str:
     return f"{norm(params.leg_a)}_{norm(params.leg_b)}"
 
 
+ACTIVE_BOT_PROFILES = [
+    {
+        'name': 'AAVE/ETH',
+        'bot_id': 'aave_eth',
+        'priority': 100,
+        'service': 'crypto-bot-aave-eth.service',
+        'params': PairParams(
+            leg_a='AAVEUSDT',
+            leg_b='ETHUSDT',
+            timeframe='60',
+            rolling_window=180,
+            entry_z=3.0,
+            stop_z=4.0,
+            target_z=0.0,
+            max_hold_bars=48,
+            risk_pct_of_equity=Decimal('0.03'),
+            enable_breakeven=False,
+        ),
+        'state_path': Path('/home/acekavi/Projects/Crypto/data/pairs_bot_aave_eth_state.json'),
+        'log_path': Path('/home/acekavi/Projects/Crypto/logs/pairs-bot-aave-eth.log'),
+    },
+    {
+        'name': 'ENA/XRP',
+        'bot_id': 'ena_xrp',
+        'priority': 90,
+        'service': 'crypto-bot-ena-xrp.service',
+        'params': PairParams(
+            leg_a='ENAUSDT',
+            leg_b='XRPUSDT',
+            timeframe='60',
+            rolling_window=336,
+            entry_z=3.25,
+            stop_z=4.5,
+            target_z=-0.5,
+            max_hold_bars=96,
+            risk_pct_of_equity=Decimal('0.03'),
+            enable_breakeven=False,
+        ),
+        'state_path': Path('/home/acekavi/Projects/Crypto/data/pairs_bot_ena_xrp_state.json'),
+        'log_path': Path('/home/acekavi/Projects/Crypto/logs/pairs-bot-ena-xrp.log'),
+    },
+    {
+        'name': 'BNB/XAUT',
+        'bot_id': 'bnb_xaut',
+        'priority': 80,
+        'service': 'crypto-bot-bnb-xaut.service',
+        'params': PairParams(
+            leg_a='BNBUSDT',
+            leg_b='XAUTUSDT',
+            timeframe='60',
+            rolling_window=240,
+            entry_z=3.0,
+            stop_z=4.5,
+            target_z=-4.5,
+            max_hold_bars=96,
+            risk_pct_of_equity=Decimal('0.03'),
+            enable_breakeven=False,
+        ),
+        'state_path': Path('/home/acekavi/Projects/Crypto/data/pairs_bot_bnb_xaut_state.json'),
+        'log_path': Path('/home/acekavi/Projects/Crypto/logs/pairs-bot-bnb-xaut.log'),
+    },
+]
+
+
+def active_bot_profiles() -> list[dict]:
+    return [{**profile} for profile in ACTIVE_BOT_PROFILES]
+
+
+def default_active_profile() -> dict:
+    return {**ACTIVE_BOT_PROFILES[0]}
+
+
+def active_portfolio_symbols() -> set[str]:
+    return {sym for profile in ACTIVE_BOT_PROFILES for sym in (profile['params'].leg_a, profile['params'].leg_b)}
+
+
 def params_from_args(args: argparse.Namespace) -> PairParams:
+    def boolish(value, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
     return PairParams(
         leg_a=args.leg_a,
         leg_b=args.leg_b,
@@ -67,6 +154,10 @@ def params_from_args(args: argparse.Namespace) -> PairParams:
         max_hold_bars=args.max_hold_bars,
         fee_per_leg=args.fee_per_leg,
         per_leg_notional_usdt=Decimal(str(args.per_leg_notional_usdt)),
+        risk_pct_of_equity=Decimal(str(getattr(args, 'risk_pct_of_equity', '0.02'))),
+        cap_per_leg_to_available_equity=boolish(getattr(args, 'cap_per_leg_to_available_equity', True), True),
+        enable_breakeven=boolish(getattr(args, 'enable_breakeven', True), True),
+        breakeven_r_multiple=Decimal(str(getattr(args, 'breakeven_r_multiple', '2'))),
     )
 
 
@@ -81,6 +172,8 @@ class PositionState:
     b_entry: str
     a_order_id: str
     b_order_id: str
+    breakeven_armed: bool = False
+    per_leg_notional_usdt: str | None = None
 
 
 @dataclass
@@ -100,7 +193,10 @@ class RuntimeState:
         data = json.loads(path.read_text())
         position = None
         if data.get("position"):
-            position = PositionState(**data["position"])
+            pdata = dict(data["position"])
+            pdata.setdefault("breakeven_armed", False)
+            pdata.setdefault("per_leg_notional_usdt", None)
+            position = PositionState(**pdata)
         return cls(
             params=params,
             last_bar_ms=data.get("last_bar_ms"),
@@ -135,7 +231,25 @@ class PairSignalEngine:
             return PairSide.LONG_SPREAD
         return None
 
-    def exit_reason(self, side: PairSide, zscore: float, age_bars: int) -> str | None:
+    def should_arm_breakeven(self, side: PairSide, zscore: float) -> bool:
+        if not self.params.enable_breakeven:
+            return False
+        risk_band = self.params.stop_z - self.params.entry_z
+        arm_multiple = float(self.params.breakeven_r_multiple)
+        if side == PairSide.SHORT_SPREAD:
+            return zscore <= (self.params.entry_z - arm_multiple * risk_band)
+        return zscore >= (-self.params.entry_z + arm_multiple * risk_band)
+
+    def exit_reason(
+        self,
+        side: PairSide,
+        zscore: float,
+        age_bars: int,
+        breakeven_armed: bool = False,
+        pnl_fraction: Decimal | None = None,
+    ) -> str | None:
+        if breakeven_armed and pnl_fraction is not None and pnl_fraction <= 0:
+            return "breakeven"
         if age_bars > self.params.max_hold_bars:
             return "time"
         if side == PairSide.SHORT_SPREAD:
@@ -151,15 +265,59 @@ class PairSignalEngine:
         return None
 
 
-def rolling_zscores(values: list[float], window: int) -> list[float | None]:
-    out: list[float | None] = [None] * len(values)
+def unrealized_pair_pnl_fraction(
+    side: PairSide,
+    a_entry: Decimal,
+    b_entry: Decimal,
+    a_now: Decimal,
+    b_now: Decimal,
+    fee_per_leg: float,
+) -> Decimal:
+    a_ret = (a_now / a_entry) - Decimal("1")
+    b_ret = (b_now / b_entry) - Decimal("1")
+    gross = (a_ret - b_ret) if side == PairSide.LONG_SPREAD else (b_ret - a_ret)
+    return gross - Decimal(str(4 * fee_per_leg))
+
+
+def risk_based_per_leg_notional(
+    params: PairParams,
+    total_equity: Decimal,
+    available_equity: Decimal,
+    spread_sigma: float,
+) -> Decimal:
+    sigma = Decimal(str(spread_sigma))
+    if sigma <= 0:
+        raise ValueError("spread_sigma must be positive")
+    desired = (total_equity * params.risk_pct_of_equity) / sigma
+    if params.cap_per_leg_to_available_equity:
+        desired = min(desired, available_equity)
+    if desired <= 0:
+        raise ValueError("per-leg notional must be positive")
+    return desired
+
+
+def rolling_mean_stddev(values: list[float], window: int) -> tuple[list[float | None], list[float | None]]:
+    means: list[float | None] = [None] * len(values)
+    sds: list[float | None] = [None] * len(values)
     if window <= 0:
         raise ValueError("window must be positive")
     for i in range(window, len(values)):
         hist = values[i - window : i]
         mean = sum(hist) / window
         var = sum((x - mean) ** 2 for x in hist) / window
-        sd = math.sqrt(max(var, 1e-12))
+        means[i] = mean
+        sds[i] = math.sqrt(max(var, 1e-12))
+    return means, sds
+
+
+def rolling_zscores(values: list[float], window: int) -> list[float | None]:
+    means, sds = rolling_mean_stddev(values, window)
+    out: list[float | None] = [None] * len(values)
+    for i in range(window, len(values)):
+        mean = means[i]
+        sd = sds[i]
+        if mean is None or sd is None:
+            continue
         out[i] = (values[i] - mean) / sd
     return out
 
@@ -191,6 +349,7 @@ def spread_series(a: Iterable[float], b: Iterable[float]) -> list[float]:
 def backtest(db_path: str, params: PairParams, start_ms: int | None = None, end_ms: int | None = None) -> dict:
     times, a_prices, b_prices = load_pair_series_from_db(db_path, params)
     spreads = spread_series(a_prices, b_prices)
+    spread_means, spread_sds = rolling_mean_stddev(spreads, params.rolling_window)
     zscores = rolling_zscores(spreads, params.rolling_window)
     engine = PairSignalEngine(params)
 
@@ -198,7 +357,7 @@ def backtest(db_path: str, params: PairParams, start_ms: int | None = None, end_
     losses = 0
     gross_profit = 0.0
     gross_loss = 0.0
-    net = 0.0
+    equity = 1.0
     position = None
     trades = []
 
@@ -208,12 +367,24 @@ def backtest(db_path: str, params: PairParams, start_ms: int | None = None, end_
         if end_ms is not None and ms >= end_ms:
             continue
         z = zscores[i]
-        if z is None:
+        sigma = spread_sds[i]
+        if z is None or sigma is None:
             continue
         if position is None:
             sig = engine.entry_signal(z)
             if sig is None:
                 continue
+            if params.risk_pct_of_equity > 0:
+                per_leg_notional = float(
+                    risk_based_per_leg_notional(
+                        params=params,
+                        total_equity=Decimal(str(equity)),
+                        available_equity=Decimal(str(equity)),
+                        spread_sigma=float(sigma),
+                    )
+                )
+            else:
+                per_leg_notional = float(params.per_leg_notional_usdt)
             position = {
                 "side": sig,
                 "entry_ms": ms,
@@ -221,20 +392,36 @@ def backtest(db_path: str, params: PairParams, start_ms: int | None = None, end_
                 "a0": a_prices[i],
                 "b0": b_prices[i],
                 "age": 0,
+                "breakeven_armed": False,
+                "per_leg_notional": per_leg_notional,
             }
             continue
 
         position["age"] += 1
-        reason = engine.exit_reason(position["side"], z, position["age"])
+        if not position["breakeven_armed"] and engine.should_arm_breakeven(position["side"], z):
+            position["breakeven_armed"] = True
+        pnl_fraction = float(
+            unrealized_pair_pnl_fraction(
+                position["side"],
+                Decimal(str(position["a0"])),
+                Decimal(str(position["b0"])),
+                Decimal(str(a_prices[i])),
+                Decimal(str(b_prices[i])),
+                params.fee_per_leg,
+            )
+        )
+        reason = engine.exit_reason(
+            position["side"],
+            z,
+            position["age"],
+            breakeven_armed=position["breakeven_armed"],
+            pnl_fraction=Decimal(str(pnl_fraction)),
+        )
         if reason is None:
             continue
 
-        a_ret = a_prices[i] / position["a0"] - 1.0
-        b_ret = b_prices[i] / position["b0"] - 1.0
-        gross = (a_ret - b_ret) if position["side"] == PairSide.LONG_SPREAD else (b_ret - a_ret)
-        fees = 4 * params.fee_per_leg
-        pnl = gross - fees
-        net += pnl
+        pnl = pnl_fraction * position["per_leg_notional"]
+        equity += pnl
         if pnl > 0:
             wins += 1
             gross_profit += pnl
@@ -250,20 +437,22 @@ def backtest(db_path: str, params: PairParams, start_ms: int | None = None, end_
                 "exit_z": z,
                 "reason": reason,
                 "net": pnl,
+                "per_leg_notional": position["per_leg_notional"],
             }
         )
         position = None
 
     trade_count = len(trades)
-    equity = 1.0
+    equity_curve = 1.0
     peak = 1.0
     max_dd = 0.0
     for trade in trades:
-        equity += trade["net"]
-        peak = max(peak, equity)
-        dd = (peak - equity) / peak if peak > 0 else 0.0
+        equity_curve += trade["net"]
+        peak = max(peak, equity_curve)
+        dd = (peak - equity_curve) / peak if peak > 0 else 0.0
         max_dd = max(max_dd, dd)
 
+    net = equity - 1.0
     return {
         "pair": f"{params.leg_a}/{params.leg_b}",
         "trades": trade_count,
@@ -393,6 +582,16 @@ class BybitClient:
         res = self.request("GET", "/v5/order/history", {"category": "linear", "orderLinkId": order_link_id})
         return res["result"].get("list", [])
 
+    def wallet_balance(self) -> dict:
+        res = self.request("GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
+        account = res["result"]["list"][0]
+        coin = account["coin"][0]
+        return {
+            "total_equity": Decimal(str(account.get("totalEquity") or coin.get("equity") or "0")),
+            "available_equity": Decimal(str(account.get("totalAvailableBalance") or account.get("totalWalletBalance") or coin.get("walletBalance") or "0")),
+            "wallet_balance": Decimal(str(account.get("totalWalletBalance") or coin.get("walletBalance") or "0")),
+        }
+
     def positions(self, symbols: tuple[str, str]) -> list[dict]:
         res = self.request("GET", "/v5/position/list", {"category": "linear", "settleCoin": "USDT"})
         out = []
@@ -458,22 +657,15 @@ def should_defer_to_higher_priority(current_signal: PairSide | None, current_sym
 
 
 BOT_PROFILES = {
-    'doge_xrp': {
-        'display_name': 'DOGE/XRP',
-        'priority': 100,
-        'params': PairParams(),
-        'state_path': '/home/acekavi/Projects/Crypto/data/pairs_bot_state.json',
-        'shared_symbols': {'DOGEUSDT', 'XRPUSDT'},
+    profile['bot_id']: {
+        'display_name': profile['name'],
+        'priority': profile['priority'],
+        'params': profile['params'],
+        'state_path': str(profile['state_path']),
+        'shared_symbols': {profile['params'].leg_a, profile['params'].leg_b},
         'higher_priority_peers': [],
-    },
-    'link_xrp': {
-        'display_name': 'LINK/XRP',
-        'priority': 50,
-        'params': PairParams(leg_a='LINKUSDT', leg_b='XRPUSDT', timeframe='60', rolling_window=240, entry_z=3.5, stop_z=4.5, target_z=0.5),
-        'state_path': '/home/acekavi/Projects/Crypto/data/pairs_bot_link_xrp_state.json',
-        'shared_symbols': {'LINKUSDT', 'XRPUSDT'},
-        'higher_priority_peers': ['doge_xrp'],
-    },
+    }
+    for profile in ACTIVE_BOT_PROFILES
 }
 
 
@@ -526,23 +718,37 @@ def sized_qty(notional: Decimal, price: Decimal, qty_step: Decimal, min_qty: Dec
     return qty
 
 
-def compute_latest_live_signal(client: BybitClient, params: PairParams) -> tuple[int, float, PairSide | None]:
+def compute_latest_live_snapshot(client: BybitClient, params: PairParams) -> dict:
     a = client.get_closed_klines(params.leg_a, params.timeframe, params.rolling_window + 5)
     b = client.get_closed_klines(params.leg_b, params.timeframe, params.rolling_window + 5)
-    by_a = {c["open_time_ms"]: float(c["close"]) for c in a}
-    by_b = {c["open_time_ms"]: float(c["close"]) for c in b}
+    by_a = {c["open_time_ms"]: c for c in a}
+    by_b = {c["open_time_ms"]: c for c in b}
     common = sorted(set(by_a).intersection(by_b))
     if len(common) < params.rolling_window + 1:
         raise RuntimeError(f"not enough closed candles: {len(common)}")
-    closes_a = [by_a[ms] for ms in common]
-    closes_b = [by_b[ms] for ms in common]
+    closes_a = [float(by_a[ms]["close"]) for ms in common]
+    closes_b = [float(by_b[ms]["close"]) for ms in common]
     spreads = spread_series(closes_a, closes_b)
+    means, sds = rolling_mean_stddev(spreads, params.rolling_window)
     zscores = rolling_zscores(spreads, params.rolling_window)
     latest_ms = common[-1]
     latest_z = zscores[-1]
-    if latest_z is None:
-        raise RuntimeError("latest zscore is missing")
-    return latest_ms, float(latest_z), PairSignalEngine(params).entry_signal(float(latest_z))
+    latest_sigma = sds[-1]
+    if latest_z is None or latest_sigma is None:
+        raise RuntimeError("latest zscore or sigma is missing")
+    return {
+        "latest_ms": latest_ms,
+        "latest_z": float(latest_z),
+        "signal": PairSignalEngine(params).entry_signal(float(latest_z)),
+        "spread_sigma": float(latest_sigma),
+        "a_close": by_a[latest_ms]["close"],
+        "b_close": by_b[latest_ms]["close"],
+    }
+
+
+def compute_latest_live_signal(client: BybitClient, params: PairParams) -> tuple[int, float, PairSide | None]:
+    snap = compute_latest_live_snapshot(client, params)
+    return snap["latest_ms"], snap["latest_z"], snap["signal"]
 
 
 def wait_for_terminal_state(client: BybitClient, symbol: str, order_link_id: str, timeout_s: int = 20) -> dict | None:
@@ -563,7 +769,14 @@ def wait_for_terminal_state(client: BybitClient, symbol: str, order_link_id: str
     return None
 
 
-def place_pair_entry(client: BybitClient, params: PairParams, side: PairSide, latest_z: float, opened_at_ms: int) -> PositionState:
+def place_pair_entry(
+    client: BybitClient,
+    params: PairParams,
+    side: PairSide,
+    latest_z: float,
+    opened_at_ms: int,
+    per_leg_notional_usdt: Decimal,
+) -> PositionState:
     slug = pair_slug(params)
     a_ticker = client.ticker(params.leg_a)
     b_ticker = client.ticker(params.leg_b)
@@ -577,14 +790,14 @@ def place_pair_entry(client: BybitClient, params: PairParams, side: PairSide, la
 
     a_price = aggressive_limit_price(a_side, a_ticker["bid1"], a_ticker["ask1"], a_instr["tick_size"])
     b_price = aggressive_limit_price(b_side, b_ticker["bid1"], b_ticker["ask1"], b_instr["tick_size"])
-    a_qty = sized_qty(params.per_leg_notional_usdt, a_ticker["last"], a_instr["qty_step"], a_instr["min_qty"], a_instr["min_notional"])
-    b_qty = sized_qty(params.per_leg_notional_usdt, b_ticker["last"], b_instr["qty_step"], b_instr["min_qty"], b_instr["min_notional"])
+    a_qty = sized_qty(per_leg_notional_usdt, a_ticker["last"], a_instr["qty_step"], a_instr["min_qty"], a_instr["min_notional"])
+    b_qty = sized_qty(per_leg_notional_usdt, b_ticker["last"], b_instr["qty_step"], b_instr["min_qty"], b_instr["min_notional"])
 
     ts = int(time.time())
     a_link = f"{slug}-a-{ts}"
     b_link = f"{slug}-b-{ts}"
 
-    logging.info("placing pair entry side=%s z=%.4f", side.value, latest_z)
+    logging.info("placing pair entry side=%s z=%.4f per_leg_notional=%s", side.value, latest_z, per_leg_notional_usdt)
     a_res = client.place_limit_order(symbol=params.leg_a, side=a_side, qty=fmt_decimal(a_qty), price=fmt_decimal(a_price), reduce_only=False, order_link_id=a_link)
     try:
         b_res = client.place_limit_order(symbol=params.leg_b, side=b_side, qty=fmt_decimal(b_qty), price=fmt_decimal(b_price), reduce_only=False, order_link_id=b_link)
@@ -620,6 +833,8 @@ def place_pair_entry(client: BybitClient, params: PairParams, side: PairSide, la
         b_entry=str(b_state.get("avgPrice") or b_state.get("price")),
         a_order_id=a_res["result"]["orderId"],
         b_order_id=b_res["result"]["orderId"],
+        breakeven_armed=False,
+        per_leg_notional_usdt=fmt_decimal(per_leg_notional_usdt),
     )
 
 
@@ -659,10 +874,21 @@ def run_live(params: PairParams, env_path: str, state_path: str, loop_seconds: i
     client = BybitClient(env_path=env_path)
     engine = PairSignalEngine(params)
 
-    logging.info("starting pair bot pair=%s rr=%.2f notional_per_leg=%s bot_id=%s", params.display_pair(), params.reward_risk_ratio(), params.per_leg_notional_usdt, bot_id)
+    logging.info(
+        "starting pair bot pair=%s rr=%.2f fixed_per_leg_notional=%s risk_pct=%s breakeven=%s bot_id=%s",
+        params.display_pair(),
+        params.reward_risk_ratio(),
+        params.per_leg_notional_usdt,
+        params.risk_pct_of_equity,
+        params.enable_breakeven,
+        bot_id,
+    )
     while True:
         try:
-            latest_ms, latest_z, signal = compute_latest_live_signal(client, params)
+            snapshot = compute_latest_live_snapshot(client, params)
+            latest_ms = snapshot["latest_ms"]
+            latest_z = snapshot["latest_z"]
+            signal = snapshot["signal"]
             state.last_loop_wall_time = time.time()
             state.last_seen_z = latest_z
             state.last_seen_signal = signal.value if signal else None
@@ -693,13 +919,49 @@ def run_live(params: PairParams, env_path: str, state_path: str, loop_seconds: i
                         state.last_guard_reason = guard_reason
                         logging.info("entry skipped reason=%s", guard_reason)
                     else:
-                        state.position = place_pair_entry(client, params, signal, latest_z, latest_ms)
-                        logging.info("pair entry filled side=%s", state.position.side.value)
+                        wallet = client.wallet_balance()
+                        per_leg_notional = risk_based_per_leg_notional(
+                            params=params,
+                            total_equity=wallet["total_equity"],
+                            available_equity=wallet["available_equity"],
+                            spread_sigma=snapshot["spread_sigma"],
+                        )
+                        state.position = place_pair_entry(client, params, signal, latest_z, latest_ms, per_leg_notional)
+                        logging.info(
+                            "pair entry filled side=%s per_leg_notional=%s total_equity=%s available_equity=%s",
+                            state.position.side.value,
+                            per_leg_notional,
+                            wallet["total_equity"],
+                            wallet["available_equity"],
+                        )
             else:
                 state.last_guard_reason = None
+                if not state.position.breakeven_armed and engine.should_arm_breakeven(state.position.side, latest_z):
+                    state.position.breakeven_armed = True
+                    logging.info("breakeven armed side=%s z=%.4f", state.position.side.value, latest_z)
                 age_bars = max(0, (latest_ms - state.position.opened_at_ms) // TF_MS)
-                reason = engine.exit_reason(state.position.side, latest_z, int(age_bars))
-                logging.info("position open age_bars=%s exit_reason=%s", age_bars, reason)
+                pnl_fraction = unrealized_pair_pnl_fraction(
+                    state.position.side,
+                    Decimal(state.position.a_entry),
+                    Decimal(state.position.b_entry),
+                    snapshot["a_close"],
+                    snapshot["b_close"],
+                    params.fee_per_leg,
+                )
+                reason = engine.exit_reason(
+                    state.position.side,
+                    latest_z,
+                    int(age_bars),
+                    breakeven_armed=state.position.breakeven_armed,
+                    pnl_fraction=pnl_fraction,
+                )
+                logging.info(
+                    "position open age_bars=%s breakeven_armed=%s pnl_fraction=%s exit_reason=%s",
+                    age_bars,
+                    state.position.breakeven_armed,
+                    pnl_fraction,
+                    reason,
+                )
                 if reason is not None:
                     close_pair_position(client, params, state.position)
                     logging.info("pair position closed reason=%s", reason)
@@ -714,6 +976,8 @@ def run_live(params: PairParams, env_path: str, state_path: str, loop_seconds: i
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pairs statistical arbitrage research harness and testnet bot")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    default_profile = default_active_profile()
+    default_params = default_profile['params']
 
     p_backtest = sub.add_parser("backtest")
     p_backtest.add_argument("--db", default="/home/acekavi/Projects/Crypto/data/history.db")
@@ -721,22 +985,40 @@ def main() -> None:
 
     p_live = sub.add_parser("live")
     p_live.add_argument("--env", default="/home/acekavi/Projects/Crypto/.env")
-    p_live.add_argument("--state", default="/home/acekavi/Projects/Crypto/data/pairs_bot_state.json")
+    p_live.add_argument("--state", default=str(default_profile['state_path']))
     p_live.add_argument("--loop-seconds", type=int, default=60)
-    p_live.add_argument("--log-file", default="/home/acekavi/Projects/Crypto/logs/pairs-bot.log")
-    p_live.add_argument("--bot-id", default="doge_xrp")
+    p_live.add_argument("--log-file", default=str(default_profile['log_path']))
+    p_live.add_argument("--bot-id", default=default_profile['bot_id'])
 
-    for subparser in (p_backtest, p_live):
-        subparser.add_argument("--leg-a", default="DOGEUSDT")
-        subparser.add_argument("--leg-b", default="XRPUSDT")
-        subparser.add_argument("--timeframe", default="60")
-        subparser.add_argument("--rolling-window", type=int, default=240)
-        subparser.add_argument("--entry-z", type=float, default=3.5)
-        subparser.add_argument("--stop-z", type=float, default=4.5)
-        subparser.add_argument("--target-z", type=float, default=0.5)
-        subparser.add_argument("--max-hold-bars", type=int, default=72)
-        subparser.add_argument("--fee-per-leg", type=float, default=0.0002)
-        subparser.add_argument("--per-leg-notional-usdt", default="25")
+    p_backtest.add_argument("--leg-a", default="DOGEUSDT")
+    p_backtest.add_argument("--leg-b", default="XRPUSDT")
+    p_backtest.add_argument("--timeframe", default="60")
+    p_backtest.add_argument("--rolling-window", type=int, default=240)
+    p_backtest.add_argument("--entry-z", type=float, default=3.5)
+    p_backtest.add_argument("--stop-z", type=float, default=4.5)
+    p_backtest.add_argument("--target-z", type=float, default=0.5)
+    p_backtest.add_argument("--max-hold-bars", type=int, default=72)
+    p_backtest.add_argument("--fee-per-leg", type=float, default=0.0002)
+    p_backtest.add_argument("--per-leg-notional-usdt", default="25")
+    p_backtest.add_argument("--risk-pct-of-equity", default="0.02")
+    p_backtest.add_argument("--cap-per-leg-to-available-equity", default="true")
+    p_backtest.add_argument("--enable-breakeven", default="true")
+    p_backtest.add_argument("--breakeven-r-multiple", default="2")
+
+    p_live.add_argument("--leg-a", default=default_params.leg_a)
+    p_live.add_argument("--leg-b", default=default_params.leg_b)
+    p_live.add_argument("--timeframe", default=default_params.timeframe)
+    p_live.add_argument("--rolling-window", type=int, default=default_params.rolling_window)
+    p_live.add_argument("--entry-z", type=float, default=default_params.entry_z)
+    p_live.add_argument("--stop-z", type=float, default=default_params.stop_z)
+    p_live.add_argument("--target-z", type=float, default=default_params.target_z)
+    p_live.add_argument("--max-hold-bars", type=int, default=default_params.max_hold_bars)
+    p_live.add_argument("--fee-per-leg", type=float, default=default_params.fee_per_leg)
+    p_live.add_argument("--per-leg-notional-usdt", default=str(default_params.per_leg_notional_usdt))
+    p_live.add_argument("--risk-pct-of-equity", default=str(default_params.risk_pct_of_equity))
+    p_live.add_argument("--cap-per-leg-to-available-equity", default=str(default_params.cap_per_leg_to_available_equity).lower())
+    p_live.add_argument("--enable-breakeven", default=str(default_params.enable_breakeven).lower())
+    p_live.add_argument("--breakeven-r-multiple", default=str(default_params.breakeven_r_multiple))
 
     args = parser.parse_args()
     configure_logging(getattr(args, "log_file", None))

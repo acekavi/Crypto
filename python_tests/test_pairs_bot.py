@@ -12,11 +12,16 @@ from scripts.pairs_bot import (
     PairSignalEngine,
     PairSide,
     RuntimeState,
+    active_bot_profiles,
+    active_portfolio_symbols,
+    default_active_profile,
     rolling_zscores,
     json_ready,
     pair_slug,
     params_from_args,
     should_defer_to_higher_priority,
+    risk_based_per_leg_notional,
+    unrealized_pair_pnl_fraction,
 )
 
 
@@ -98,11 +103,19 @@ class PairSignalEngineTests(unittest.TestCase):
             max_hold_bars=72,
             fee_per_leg=0.0002,
             per_leg_notional_usdt='35',
+            risk_pct_of_equity='0.02',
+            cap_per_leg_to_available_equity='true',
+            enable_breakeven='true',
+            breakeven_r_multiple='2',
         )
         p = params_from_args(args)
         self.assertEqual(p.leg_a, 'LINKUSDT')
         self.assertEqual(p.leg_b, 'XRPUSDT')
         self.assertEqual(p.per_leg_notional_usdt, Decimal('35'))
+        self.assertEqual(p.risk_pct_of_equity, Decimal('0.02'))
+        self.assertTrue(p.cap_per_leg_to_available_equity)
+        self.assertTrue(p.enable_breakeven)
+        self.assertEqual(p.breakeven_r_multiple, Decimal('2'))
         self.assertAlmostEqual(p.reward_risk_ratio(), 3.0)
 
     def test_lower_priority_bot_defers_when_higher_priority_has_local_position(self):
@@ -136,6 +149,74 @@ class PairSignalEngineTests(unittest.TestCase):
         )
         self.assertIn('same bar', reason)
         self.assertIn('DOGE/XRP', reason)
+
+    def test_risk_based_notional_is_capped_by_available_equity(self):
+        p = PairParams(risk_pct_of_equity=Decimal('0.02'), cap_per_leg_to_available_equity=True)
+        out = risk_based_per_leg_notional(
+            params=p,
+            total_equity=Decimal('10000'),
+            available_equity=Decimal('8000'),
+            spread_sigma=0.0004,
+        )
+        self.assertEqual(out, Decimal('8000'))
+
+    def test_risk_based_notional_scales_from_equity_and_sigma(self):
+        p = PairParams(risk_pct_of_equity=Decimal('0.02'), cap_per_leg_to_available_equity=True)
+        out = risk_based_per_leg_notional(
+            params=p,
+            total_equity=Decimal('10000'),
+            available_equity=Decimal('10000'),
+            spread_sigma=0.05,
+        )
+        self.assertEqual(out, Decimal('4000'))
+
+    def test_short_spread_breakeven_arms_at_two_r_and_exits_when_pnl_turns_negative(self):
+        p = PairParams(enable_breakeven=True, breakeven_r_multiple=Decimal('2'))
+        engine = PairSignalEngine(p)
+        self.assertTrue(engine.should_arm_breakeven(PairSide.SHORT_SPREAD, 1.5))
+        pnl_frac = unrealized_pair_pnl_fraction(PairSide.SHORT_SPREAD, Decimal('10'), Decimal('1'), Decimal('10.3'), Decimal('0.99'), p.fee_per_leg)
+        self.assertLessEqual(pnl_frac, Decimal('0'))
+        self.assertEqual(engine.exit_reason(PairSide.SHORT_SPREAD, 1.6, age_bars=5, breakeven_armed=True, pnl_fraction=pnl_frac), 'breakeven')
+
+    def test_long_spread_breakeven_arms_at_two_r(self):
+        p = PairParams(enable_breakeven=True, breakeven_r_multiple=Decimal('2'))
+        engine = PairSignalEngine(p)
+        self.assertTrue(engine.should_arm_breakeven(PairSide.LONG_SPREAD, -1.5))
+
+    def test_active_bot_profiles_only_include_the_live_three_bot_portfolio(self):
+        profiles = active_bot_profiles()
+        self.assertEqual([p['bot_id'] for p in profiles], ['aave_eth', 'ena_xrp', 'bnb_xaut'])
+        self.assertEqual([p['service'] for p in profiles], [
+            'crypto-bot-aave-eth.service',
+            'crypto-bot-ena-xrp.service',
+            'crypto-bot-bnb-xaut.service',
+        ])
+
+    def test_active_portfolio_has_no_symbol_overlap(self):
+        self.assertEqual(
+            active_portfolio_symbols(),
+            {
+                'AAVEUSDT', 'ETHUSDT',
+                'ENAUSDT', 'XRPUSDT',
+                'BNBUSDT', 'XAUTUSDT',
+            },
+        )
+        profiles = active_bot_profiles()
+        all_symbols = []
+        for p in profiles:
+            all_symbols.extend([p['params'].leg_a, p['params'].leg_b])
+        self.assertEqual(len(all_symbols), len(set(all_symbols)))
+
+    def test_active_bot_profiles_run_three_percent_risk(self):
+        profiles = active_bot_profiles()
+        for p in profiles:
+            self.assertEqual(p['params'].risk_pct_of_equity, Decimal('0.03'))
+
+    def test_default_active_profile_is_aave_eth(self):
+        profile = default_active_profile()
+        self.assertEqual(profile['bot_id'], 'aave_eth')
+        self.assertEqual(profile['state_path'].name, 'pairs_bot_aave_eth_state.json')
+        self.assertEqual(profile['log_path'].name, 'pairs-bot-aave-eth.log')
 
 
 if __name__ == '__main__':
