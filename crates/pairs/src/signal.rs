@@ -61,7 +61,7 @@ pub struct PairParams {
     pub stop_z: f64,
     pub target_z: f64,
     pub max_hold_bars: i64,
-    pub fee_per_leg: f64,
+    pub fee_per_leg: Decimal,
     /// Used only when `risk_pct_of_equity` is zero, which is the backtest's
     /// fixed-size mode. Every live profile runs risk-based sizing.
     pub per_leg_notional_usdt: Decimal,
@@ -212,7 +212,7 @@ pub fn unrealized_pnl_fraction(
     b_entry: Decimal,
     a_now: Decimal,
     b_now: Decimal,
-    fee_per_leg: f64,
+    fee_per_leg: Decimal,
 ) -> Decimal {
     let a_ret = a_now / a_entry - Decimal::ONE;
     let b_ret = b_now / b_entry - Decimal::ONE;
@@ -220,7 +220,7 @@ pub fn unrealized_pnl_fraction(
         PairSide::LongSpread => a_ret - b_ret,
         PairSide::ShortSpread => b_ret - a_ret,
     };
-    let fees = Decimal::try_from(4.0 * fee_per_leg).unwrap_or(Decimal::ZERO);
+    let fees = Decimal::from(4) * fee_per_leg;
     gross - fees
 }
 
@@ -239,7 +239,7 @@ mod tests {
             stop_z: 4.5,
             target_z: 0.5,
             max_hold_bars: 72,
-            fee_per_leg: 0.0002,
+            fee_per_leg: dec!(0.0002),
             per_leg_notional_usdt: dec!(25),
             risk_pct_of_equity: dec!(0.02),
             max_notional_multiple_of_equity: dec!(1),
@@ -360,7 +360,7 @@ mod tests {
             dec!(1),
             dec!(10.3),
             dec!(0.99),
-            0.0002,
+            dec!(0.0002),
         );
         assert!(pnl <= dec!(0), "pnl fraction was {pnl}");
         assert_eq!(
@@ -387,7 +387,7 @@ mod tests {
             dec!(100),
             dec!(100),
             dec!(100),
-            0.0002,
+            dec!(0.0002),
         );
         assert_eq!(pnl, dec!(-0.0008));
     }
