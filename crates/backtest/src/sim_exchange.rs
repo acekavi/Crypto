@@ -372,6 +372,16 @@ impl ExchangeClient for SimulatedExchange {
         Ok(Vec::new())
     }
 
+    /// Errors rather than inventing a book. The simulator has no top of book
+    /// to serve — its whole price model is the candle passed to `advance` —
+    /// and returning a fabricated bid/ask would let a backtest fill against
+    /// prices that never existed.
+    async fn ticker(&self, symbol: &Symbol) -> Result<Ticker, ExchangeError> {
+        Err(ExchangeError::Decode(format!(
+            "the simulated exchange has no top of book for {symbol}"
+        )))
+    }
+
     async fn klines(
         &self,
         _symbol: &Symbol,

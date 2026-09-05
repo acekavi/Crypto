@@ -99,6 +99,8 @@ mod tests {
             symbol: Symbol::new(sym),
             turnover_24h: turnover,
             last_price: dec!(100),
+            bid1: dec!(99.99),
+            ask1: dec!(100.01),
         }
     }
 

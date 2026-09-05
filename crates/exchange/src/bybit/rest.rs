@@ -464,6 +464,23 @@ impl ExchangeClient for BybitRest {
         res.list.into_iter().map(TickerRow::into_ticker).collect()
     }
 
+    async fn ticker(&self, symbol: &Symbol) -> Result<Ticker, ExchangeError> {
+        let res: ListResult<TickerRow> = self
+            .get(
+                "/v5/market/tickers",
+                &[
+                    ("category", "linear".into()),
+                    ("symbol", symbol.as_str().into()),
+                ],
+            )
+            .await?;
+        res.list
+            .into_iter()
+            .next()
+            .ok_or_else(|| ExchangeError::Decode(format!("no ticker for {symbol}")))?
+            .into_ticker()
+    }
+
     /// Recent klines, returned **oldest first** regardless of Bybit's ordering,
     /// because indicators must be fed chronologically.
     async fn klines(

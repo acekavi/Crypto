@@ -209,6 +209,20 @@ impl ExchangeClient for MockExchange {
         Ok(self.tickers.clone())
     }
 
+    /// Served from the same `with_tickers` data, so a test never has to seed
+    /// two sources that could disagree.
+    ///
+    /// Deliberately not counted in `tickers_call_count`: that counter exists to
+    /// catch needless fetches of the all-symbols endpoint, and folding a
+    /// single-symbol lookup into it would make a cheap call look expensive.
+    async fn ticker(&self, symbol: &Symbol) -> Result<Ticker, ExchangeError> {
+        self.tickers
+            .iter()
+            .find(|t| &t.symbol == symbol)
+            .cloned()
+            .ok_or_else(|| ExchangeError::Decode(format!("no ticker for {symbol}")))
+    }
+
     async fn klines(
         &self,
         symbol: &Symbol,

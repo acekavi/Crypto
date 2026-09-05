@@ -21,6 +21,13 @@ use crate::bybit::wire::Ticker;
 pub trait ExchangeClient: Send + Sync {
     async fn instruments(&self) -> Result<Vec<Instrument>, ExchangeError>;
     async fn tickers(&self) -> Result<Vec<Ticker>, ExchangeError>;
+    /// One symbol's top of book.
+    ///
+    /// Distinct from [`ExchangeClient::tickers`], which returns every linear
+    /// symbol and was measured at 4.5-10 s. That is fine for a daily universe
+    /// re-rank and far too slow to sit inside an order path, where the unwind
+    /// ladder needs a fresh quote between attempts.
+    async fn ticker(&self, symbol: &Symbol) -> Result<Ticker, ExchangeError>;
     async fn klines(
         &self,
         symbol: &Symbol,

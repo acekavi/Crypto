@@ -159,14 +159,25 @@ pub struct TickerRow {
     pub turnover_24h: String,
     #[serde(rename = "lastPrice")]
     pub last_price: String,
+    #[serde(rename = "bid1Price")]
+    pub bid1_price: String,
+    #[serde(rename = "ask1Price")]
+    pub ask1_price: String,
 }
 
-/// 24h market statistics, used for universe ranking.
+/// 24h market statistics plus the top of book.
+///
+/// The statistics rank the daily universe; the book prices every pair leg.
+/// `last_price` is deliberately not a substitute for either side of the book:
+/// it is the last *trade*, so pricing a crossing limit off it silently ignores
+/// the spread and, on a thin symbol, prices the order on the wrong side of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ticker {
     pub symbol: Symbol,
     pub turnover_24h: Decimal,
     pub last_price: Decimal,
+    pub bid1: Decimal,
+    pub ask1: Decimal,
 }
 
 impl TickerRow {
@@ -179,6 +190,8 @@ impl TickerRow {
             symbol: Symbol::new(self.symbol),
             turnover_24h: parse(&self.turnover_24h, "turnover24h")?,
             last_price: parse(&self.last_price, "lastPrice")?,
+            bid1: parse(&self.bid1_price, "bid1Price")?,
+            ask1: parse(&self.ask1_price, "ask1Price")?,
         })
     }
 }

@@ -44,10 +44,14 @@ fn position(side: Side) -> Position {
 }
 
 fn ticker(last_price: Decimal) -> Ticker {
+    // A one-tick book straddling the last trade: these tests only care about
+    // `last_price`, but a `Ticker` with no book would be an impossible state.
     Ticker {
         symbol: btc(),
         turnover_24h: Decimal::ZERO,
         last_price,
+        bid1: last_price - dec!(0.5),
+        ask1: last_price + dec!(0.5),
     }
 }
 

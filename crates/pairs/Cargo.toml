@@ -6,10 +6,16 @@ rust-version.workspace = true
 
 [dependencies]
 botcore = { path = "../botcore" }
+exchange = { path = "../exchange" }
 rust_decimal.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
+# Only the scriptable `ExchangeClient` double in `tests/support` implements an
+# async trait; nothing in `src` does, so this stays out of [dependencies].
+async-trait = "0.1"
 rust_decimal_macros.workspace = true
 serde_json.workspace = true
