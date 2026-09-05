@@ -1,5 +1,5 @@
 use backtest::{CostModel, ExitReason, SimulatedExchange};
-use botcore::{Candle, Instrument, LimitEntry, Side, Symbol};
+use botcore::{Candle, Instrument, LimitEntry, LimitLeg, OrderState, Side, Symbol};
 use exchange::ExchangeClient;
 use exchange::bybit::wire::FundingRate;
 use rust_decimal_macros::dec;
@@ -39,6 +39,17 @@ fn oracle_entry(sym: &Symbol, link_id: &str) -> LimitEntry {
         stop_limit_price: dec!(98),
         take_profit: dec!(104),
         breakeven_at_r: None,
+    }
+}
+
+fn leg(sym: &Symbol, side: Side, price: rust_decimal::Decimal, link_id: &str) -> LimitLeg {
+    LimitLeg {
+        symbol: sym.clone(),
+        side,
+        qty: dec!(10),
+        price,
+        order_link_id: link_id.into(),
+        reduce_only: false,
     }
 }
 
@@ -752,4 +763,103 @@ async fn a_short_moves_to_breakeven_on_a_downward_move() {
 
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].exit_price, dec!(100), "short exits at entry");
+}
+
+#[tokio::test]
+async fn a_leg_priced_beyond_the_candles_range_does_not_fill() {
+    let sym = Symbol::new("AAVEUSDT");
+    let sim = SimulatedExchange::new(
+        dec!(10000),
+        vec![instrument(&sym)],
+        CostModel {
+            maker_fee_rate: dec!(0.0002),
+        },
+    );
+
+    // The market's whole range this bar is 99-101. A buy leg priced at 90 is
+    // nowhere near it, so it must not fill just because a leg is "supposed
+    // to" fill immediately.
+    sim.advance(&sym, &candle_at(0, dec!(101), dec!(99)), &[]);
+
+    sim.place_limit_leg(leg(&sym, Side::Buy, dec!(90), "leg-no-fill"))
+        .await
+        .expect("placement accepted");
+
+    let status = sim
+        .order_by_link_id(&sym, "leg-no-fill")
+        .await
+        .expect("query succeeded")
+        .expect("a placed leg is recorded even when it has not filled");
+    assert_eq!(
+        status.state,
+        OrderState::New,
+        "the market never traded through this price"
+    );
+    assert_eq!(status.cum_exec_qty, dec!(0));
+    assert_eq!(status.avg_price, dec!(0));
+
+    // No fee for a fill that never happened.
+    let bal = sim.balance().await.expect("balance");
+    assert_eq!(bal.equity, dec!(10000));
+}
+
+#[tokio::test]
+async fn a_leg_placed_before_any_candle_is_seen_does_not_fill() {
+    // The stricter case: no candle has ever been observed for this symbol,
+    // so there is zero evidence the market has traded anywhere at all.
+    let sym = Symbol::new("AAVEUSDT");
+    let sim = SimulatedExchange::new(
+        dec!(10000),
+        vec![instrument(&sym)],
+        CostModel {
+            maker_fee_rate: dec!(0.0002),
+        },
+    );
+
+    sim.place_limit_leg(leg(&sym, Side::Buy, dec!(100), "leg-blind"))
+        .await
+        .expect("placement accepted");
+
+    let status = sim
+        .order_by_link_id(&sym, "leg-blind")
+        .await
+        .expect("query succeeded")
+        .expect("leg recorded");
+    assert_eq!(status.state, OrderState::New);
+
+    let bal = sim.balance().await.expect("balance");
+    assert_eq!(bal.equity, dec!(10000));
+}
+
+#[tokio::test]
+async fn a_leg_priced_inside_the_candles_range_fills_and_charges_the_maker_fee() {
+    let sym = Symbol::new("AAVEUSDT");
+    let sim = SimulatedExchange::new(
+        dec!(10000),
+        vec![instrument(&sym)],
+        CostModel {
+            maker_fee_rate: dec!(0.0002),
+        },
+    );
+
+    sim.advance(&sym, &candle_at(0, dec!(101), dec!(99)), &[]);
+
+    // Buy at 99.5: the candle's low (99) traded strictly through it.
+    sim.place_limit_leg(leg(&sym, Side::Buy, dec!(99.5), "leg-fill"))
+        .await
+        .expect("placement accepted");
+
+    let status = sim
+        .order_by_link_id(&sym, "leg-fill")
+        .await
+        .expect("query succeeded")
+        .expect("leg recorded");
+    assert_eq!(status.state, OrderState::Filled);
+    assert_eq!(status.cum_exec_qty, dec!(10));
+    // Never better than the leg's own price, matching limit_fill's rule.
+    assert_eq!(status.avg_price, dec!(99.5));
+
+    // 10 * 99.5 * 0.0002 = 0.199, charged at fill.
+    let bal = sim.balance().await.expect("balance");
+    assert_eq!(bal.equity, dec!(10000) - dec!(0.199));
 }

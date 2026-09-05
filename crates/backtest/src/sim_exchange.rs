@@ -126,6 +126,15 @@ struct State {
     /// `order_by_link_id` can answer without a separate position model — this
     /// crate does not track pair positions, only the fill each leg produced.
     legs: HashMap<String, OrderStatus>,
+    /// The most recent candle `advance` has settled for each symbol.
+    ///
+    /// `place_limit_leg` checks a leg's fill against this rather than against
+    /// nothing: by the time the replay driver could have decided to place a
+    /// leg for a candle, `advance` has already been called with that same
+    /// candle (see `replay.rs`, where `sim.advance` runs before
+    /// `engine.on_candle_closed` for every tick), so this is already-observed
+    /// data, not a future candle the placement call is peeking at.
+    last_candle: HashMap<Symbol, Candle>,
 }
 
 /// An `ExchangeClient` over historical candles.
@@ -150,6 +159,7 @@ impl SimulatedExchange {
                 positions: HashMap::new(),
                 closed: Vec::new(),
                 legs: HashMap::new(),
+                last_candle: HashMap::new(),
             }),
         }
     }
@@ -186,6 +196,10 @@ impl SimulatedExchange {
     ) -> Vec<ClosedTrade> {
         let mut state = self.state.lock().expect("sim exchange lock");
         let mut newly_closed = Vec::new();
+
+        // Recorded unconditionally, before anything else, so `place_limit_leg`
+        // always sees the latest candle this symbol has settled.
+        state.last_candle.insert(symbol.clone(), candle.clone());
 
         // Accrue funding BEFORE resolving the exit, and at THIS candle's
         // close. Charging a whole hold at the exit price instead would bias
@@ -382,15 +396,31 @@ impl ExchangeClient for SimulatedExchange {
         Ok(ack)
     }
 
-    /// Fills the leg immediately, unlike `place_limit_entry`'s resting order.
+    /// Decides the leg synchronously, unlike `place_limit_entry`'s resting
+    /// order — but only fills it if the market actually traded through its
+    /// price. `place_limit_entry` defers its trade-through check to a later
+    /// `advance` call because filling on the same call that created the
+    /// order would be look-ahead; a leg has no such risk to guard against
+    /// because it is checked against `last_candle`, the candle `advance` most
+    /// recently settled for this symbol — already-observed data, not one
+    /// still ahead of the caller (see `last_candle`'s field comment).
     ///
-    /// A pair leg is priced *through* the book on purpose — that is the whole
-    /// difference between GTC and PostOnly — so modelling it as a fill that
-    /// waits for a future candle in `advance` would replay a live order type
-    /// this simulator does not otherwise support. It fills at its own limit
-    /// price (never better, matching `limit_fill`'s no-favourable-slippage
-    /// rule) and pays the same per-fill cost `advance` already charges an
-    /// entry; there is no separate taker-fee model to reach for instead.
+    /// Reuses `limit_fill`, the exact rule a resting `LimitEntry` is filled
+    /// against in `advance`, rather than a second copy of trade-through
+    /// logic: a buy leg fills only if the candle traded strictly below its
+    /// price, a sell leg only if it traded strictly above, and never at a
+    /// price better than the leg's own. A leg the market never reached — or
+    /// one placed before any candle has been seen for its symbol at all — is
+    /// left resting as `OrderState::New` instead of being marked Filled; this
+    /// simulator does not re-check a resting leg against later candles, so
+    /// such a leg simply stays New for the rest of the run.
+    ///
+    /// A filled leg pays `maker_fee`, the only per-fill cost this crate's
+    /// `CostModel` knows how to compute. That is an approximation, not a
+    /// statement that a leg's cost is genuinely the same as an entry's: a
+    /// leg is priced *through* the book by design, which is a taker fill on
+    /// a real exchange, and Bybit's taker rate is higher than its maker rate.
+    /// Charging `maker_fee` here understates the true cost of every leg.
     ///
     /// This does not touch `positions` — that map's shape (stop, target,
     /// breakeven) belongs to directional `LimitEntry` trades. A pair's own
@@ -402,14 +432,21 @@ impl ExchangeClient for SimulatedExchange {
             order_id: format!("sim-{}", req.order_link_id),
             order_link_id: req.order_link_id.clone(),
         };
-        let fee = self.costs.maker_fee(req.qty, req.price);
-        state.equity -= fee;
-        state.legs.insert(
-            req.order_link_id.clone(),
+
+        let filled = state.last_candle.get(&req.symbol).is_some_and(|candle| {
+            matches!(
+                limit_fill(req.side, req.price, candle),
+                crate::fills::FillOutcome::Filled { .. }
+            )
+        });
+
+        let status = if filled {
+            let fee = self.costs.maker_fee(req.qty, req.price);
+            state.equity -= fee;
             OrderStatus {
                 symbol: req.symbol,
                 order_id: ack.order_id.clone(),
-                order_link_id: req.order_link_id,
+                order_link_id: req.order_link_id.clone(),
                 side: req.side,
                 state: OrderState::Filled,
                 qty: req.qty,
@@ -419,14 +456,29 @@ impl ExchangeClient for SimulatedExchange {
                 // reads the wall clock (see `open_orders`'s created_time_ms),
                 // so order age genuinely isn't known here.
                 updated_time_ms: 0,
-            },
-        );
+            }
+        } else {
+            OrderStatus {
+                symbol: req.symbol,
+                order_id: ack.order_id.clone(),
+                order_link_id: req.order_link_id.clone(),
+                side: req.side,
+                state: OrderState::New,
+                qty: req.qty,
+                cum_exec_qty: Decimal::ZERO,
+                avg_price: Decimal::ZERO,
+                updated_time_ms: 0,
+            }
+        };
+        state.legs.insert(req.order_link_id, status);
         Ok(ack)
     }
 
-    /// Every leg this simulator has ever placed fills synchronously in
-    /// `place_limit_leg`, so there is no "still resting" case to distinguish
-    /// from history the way the live client does — one lookup answers both.
+    /// Answers from the record `place_limit_leg` wrote: `Filled` if the
+    /// market had already traded through the leg's price when it was placed,
+    /// `New` if it had not (and, in this simulator, will never be re-checked
+    /// against a later candle — see `place_limit_leg`'s doc comment), or
+    /// `None` if this link id was never placed at all.
     async fn order_by_link_id(
         &self,
         _symbol: &Symbol,
