@@ -7,6 +7,6 @@ pub mod symbol;
 
 pub use candle::{Candle, Timeframe};
 pub use error::ErrorClass;
-pub use order::{LimitEntry, OpenOrder, OrderAck, OrderState, Side};
+pub use order::{LimitEntry, LimitLeg, OpenOrder, OrderAck, OrderState, OrderStatus, Side};
 pub use position::{Balance, Position};
 pub use symbol::{Instrument, Symbol};

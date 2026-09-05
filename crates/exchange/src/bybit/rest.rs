@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use botcore::{
-    Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe,
+    Balance, Candle, Instrument, LimitEntry, LimitLeg, OpenOrder, OrderAck, OrderStatus, Position,
+    Symbol, Timeframe,
 };
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
@@ -520,6 +521,53 @@ impl ExchangeClient for BybitRest {
             order_id: res.order_id,
             order_link_id: res.order_link_id,
         })
+    }
+
+    async fn place_limit_leg(&self, req: LimitLeg) -> Result<OrderAck, ExchangeError> {
+        let body = json!({
+            "category": "linear",
+            "symbol": req.symbol.as_str(),
+            "side": req.side.as_bybit(),
+            "orderType": "Limit",
+            // GTC and not PostOnly: the price crosses the book deliberately.
+            // GTC and not IOC: a partial fill that cancels its own remainder
+            // would leave the pair carrying mismatched leg sizes with nothing
+            // recording the intent.
+            "timeInForce": "GTC",
+            "positionIdx": 0,
+            "qty": req.qty.normalize().to_string(),
+            "price": req.price.normalize().to_string(),
+            "orderLinkId": req.order_link_id,
+            "reduceOnly": req.reduce_only,
+        });
+        let res: OrderCreateResult = self.post("/v5/order/create", body).await?;
+        Ok(OrderAck {
+            order_id: res.order_id,
+            order_link_id: res.order_link_id,
+        })
+    }
+
+    async fn order_by_link_id(
+        &self,
+        symbol: &Symbol,
+        link_id: &str,
+    ) -> Result<Option<OrderStatus>, ExchangeError> {
+        for path in ["/v5/order/realtime", "/v5/order/history"] {
+            let res: ListResult<OpenOrderRow> = self
+                .get(
+                    path,
+                    &[
+                        ("category", "linear".into()),
+                        ("symbol", symbol.as_str().into()),
+                        ("orderLinkId", link_id.into()),
+                    ],
+                )
+                .await?;
+            if let Some(row) = res.list.into_iter().next() {
+                return Ok(Some(row.into_order_status()?));
+            }
+        }
+        Ok(None)
     }
 
     async fn cancel_order(&self, symbol: &Symbol, link_id: &str) -> Result<(), ExchangeError> {

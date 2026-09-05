@@ -12,8 +12,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use botcore::{
-    Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, OrderState, Position, Side,
-    Symbol, Timeframe,
+    Balance, Candle, Instrument, LimitEntry, LimitLeg, OpenOrder, OrderAck, OrderState,
+    OrderStatus, Position, Side, Symbol, Timeframe,
 };
 use exchange::ExchangeClient;
 use exchange::bybit::transport::ExchangeError;
@@ -122,6 +122,10 @@ struct State {
     /// net position per symbol, which this mirrors directly.
     positions: HashMap<Symbol, OpenPosition>,
     closed: Vec<ClosedTrade>,
+    /// Pair legs placed via `place_limit_leg`, keyed by `order_link_id` so
+    /// `order_by_link_id` can answer without a separate position model — this
+    /// crate does not track pair positions, only the fill each leg produced.
+    legs: HashMap<String, OrderStatus>,
 }
 
 /// An `ExchangeClient` over historical candles.
@@ -145,6 +149,7 @@ impl SimulatedExchange {
                 resting: HashMap::new(),
                 positions: HashMap::new(),
                 closed: Vec::new(),
+                legs: HashMap::new(),
             }),
         }
     }
@@ -375,6 +380,60 @@ impl ExchangeClient for SimulatedExchange {
         // that arrived after.
         state.resting.insert(req.order_link_id.clone(), req);
         Ok(ack)
+    }
+
+    /// Fills the leg immediately, unlike `place_limit_entry`'s resting order.
+    ///
+    /// A pair leg is priced *through* the book on purpose — that is the whole
+    /// difference between GTC and PostOnly — so modelling it as a fill that
+    /// waits for a future candle in `advance` would replay a live order type
+    /// this simulator does not otherwise support. It fills at its own limit
+    /// price (never better, matching `limit_fill`'s no-favourable-slippage
+    /// rule) and pays the same per-fill cost `advance` already charges an
+    /// entry; there is no separate taker-fee model to reach for instead.
+    ///
+    /// This does not touch `positions` — that map's shape (stop, target,
+    /// breakeven) belongs to directional `LimitEntry` trades. A pair's own
+    /// position/PnL bookkeeping is the executor's job, built on top of the
+    /// `OrderStatus` this returns, not this exchange's.
+    async fn place_limit_leg(&self, req: LimitLeg) -> Result<OrderAck, ExchangeError> {
+        let mut state = self.state.lock().expect("sim exchange lock");
+        let ack = OrderAck {
+            order_id: format!("sim-{}", req.order_link_id),
+            order_link_id: req.order_link_id.clone(),
+        };
+        let fee = self.costs.maker_fee(req.qty, req.price);
+        state.equity -= fee;
+        state.legs.insert(
+            req.order_link_id.clone(),
+            OrderStatus {
+                symbol: req.symbol,
+                order_id: ack.order_id.clone(),
+                order_link_id: req.order_link_id,
+                side: req.side,
+                state: OrderState::Filled,
+                qty: req.qty,
+                cum_exec_qty: req.qty,
+                avg_price: req.price,
+                // place_limit_leg takes no timestamp and this crate never
+                // reads the wall clock (see `open_orders`'s created_time_ms),
+                // so order age genuinely isn't known here.
+                updated_time_ms: 0,
+            },
+        );
+        Ok(ack)
+    }
+
+    /// Every leg this simulator has ever placed fills synchronously in
+    /// `place_limit_leg`, so there is no "still resting" case to distinguish
+    /// from history the way the live client does — one lookup answers both.
+    async fn order_by_link_id(
+        &self,
+        _symbol: &Symbol,
+        link_id: &str,
+    ) -> Result<Option<OrderStatus>, ExchangeError> {
+        let state = self.state.lock().expect("sim exchange lock");
+        Ok(state.legs.get(link_id).cloned())
     }
 
     async fn amend_stop(

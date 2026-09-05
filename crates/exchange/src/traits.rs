@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use botcore::{
-    Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe,
+    Balance, Candle, Instrument, LimitEntry, LimitLeg, OpenOrder, OrderAck, OrderStatus, Position,
+    Symbol, Timeframe,
 };
 use rust_decimal::Decimal;
 use tokio::sync::broadcast;
@@ -27,6 +28,28 @@ pub trait ExchangeClient: Send + Sync {
         limit: u16,
     ) -> Result<Vec<Candle>, ExchangeError>;
     async fn place_limit_entry(&self, req: LimitEntry) -> Result<OrderAck, ExchangeError>;
+    /// Place one leg of a pair trade: a GTC limit with no protection attached.
+    ///
+    /// `orderType` is hard-coded to `"Limit"` here exactly as it is in
+    /// `place_limit_entry`; no parameter can change it.
+    async fn place_limit_leg(&self, req: LimitLeg) -> Result<OrderAck, ExchangeError>;
+
+    /// Look one order up by its `orderLinkId`, wherever it currently lives.
+    ///
+    /// Checks the realtime table first, then order history. Both are needed:
+    /// Bybit drops terminal orders out of `/v5/order/realtime` after a short
+    /// window, so a poll that only reads realtime can time out on an order
+    /// that has in fact filled — and then the caller unwinds a leg it still
+    /// holds.
+    ///
+    /// `Ok(None)` means the exchange has never heard of this id, which is a
+    /// materially different state from a rejection and must not be collapsed
+    /// into an error.
+    async fn order_by_link_id(
+        &self,
+        symbol: &Symbol,
+        link_id: &str,
+    ) -> Result<Option<OrderStatus>, ExchangeError>;
     async fn amend_stop(
         &self,
         symbol: &Symbol,

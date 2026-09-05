@@ -3,7 +3,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use botcore::{
-    Balance, Candle, Instrument, LimitEntry, OpenOrder, OrderAck, Position, Symbol, Timeframe,
+    Balance, Candle, Instrument, LimitEntry, LimitLeg, OpenOrder, OrderAck, OrderStatus, Position,
+    Symbol, Timeframe,
 };
 use exchange::ExchangeClient;
 use exchange::bybit::transport::ExchangeError;
@@ -26,6 +27,7 @@ pub fn test_candle(open_time_ms: i64) -> Candle {
 #[derive(Debug, Default)]
 struct Recorded {
     placed: Vec<LimitEntry>,
+    placed_legs: Vec<LimitLeg>,
     cancelled: Vec<String>,
     amended: Vec<(Symbol, Decimal, Decimal)>,
     place_entry_calls: usize,
@@ -51,6 +53,10 @@ pub struct MockExchange {
     tickers: Vec<Ticker>,
     klines: HashMap<(String, Timeframe), Vec<Candle>>,
     open_orders: Vec<OpenOrder>,
+    /// Scripted `order_by_link_id` answers, keyed by `order_link_id`. A link
+    /// id with no entry here yields `None`, matching a real exchange that has
+    /// never heard of the id — not an error, and not a fabricated status.
+    order_statuses: HashMap<String, OrderStatus>,
     place_failure: Mutex<InjectedFailure>,
     cancel_failure: Mutex<InjectedFailure>,
     amend_failure: Mutex<InjectedFailure>,
@@ -75,6 +81,7 @@ impl MockExchange {
             tickers: Vec::new(),
             klines: HashMap::new(),
             open_orders: Vec::new(),
+            order_statuses: HashMap::new(),
             place_failure: Mutex::new(InjectedFailure::None),
             cancel_failure: Mutex::new(InjectedFailure::None),
             amend_failure: Mutex::new(InjectedFailure::None),
@@ -110,6 +117,14 @@ impl MockExchange {
 
     pub fn with_open_orders(mut self, orders: Vec<OpenOrder>) -> Self {
         self.open_orders = orders;
+        self
+    }
+
+    /// Script `order_by_link_id`'s answer for one link id. Unscripted ids
+    /// return `None`, so a test only needs to set up the orders it cares
+    /// about polling.
+    pub fn with_order_status(mut self, link_id: impl Into<String>, status: OrderStatus) -> Self {
+        self.order_statuses.insert(link_id.into(), status);
         self
     }
 
@@ -155,6 +170,10 @@ impl MockExchange {
 
     pub fn placed_orders(&self) -> Vec<LimitEntry> {
         self.recorded.lock().expect("mock lock").placed.clone()
+    }
+
+    pub fn placed_legs(&self) -> Vec<LimitLeg> {
+        self.recorded.lock().expect("mock lock").placed_legs.clone()
     }
 
     pub fn cancelled(&self) -> Vec<String> {
@@ -230,6 +249,30 @@ impl ExchangeClient for MockExchange {
         };
         self.recorded.lock().expect("mock lock").placed.push(req);
         Ok(ack)
+    }
+
+    /// Records the leg the same way `place_limit_entry` records an entry —
+    /// no failure injection, since nothing in this task's tests needs a leg
+    /// placement to fail.
+    async fn place_limit_leg(&self, req: LimitLeg) -> Result<OrderAck, ExchangeError> {
+        let ack = OrderAck {
+            order_id: format!("mock-{}", req.order_link_id),
+            order_link_id: req.order_link_id.clone(),
+        };
+        self.recorded
+            .lock()
+            .expect("mock lock")
+            .placed_legs
+            .push(req);
+        Ok(ack)
+    }
+
+    async fn order_by_link_id(
+        &self,
+        _symbol: &Symbol,
+        link_id: &str,
+    ) -> Result<Option<OrderStatus>, ExchangeError> {
+        Ok(self.order_statuses.get(link_id).cloned())
     }
 
     async fn amend_stop(

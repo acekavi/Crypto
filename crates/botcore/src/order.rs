@@ -90,3 +90,63 @@ pub struct OpenOrder {
     /// placed.
     pub updated_time_ms: i64,
 }
+
+/// One leg of a pair trade: a plain limit order with no protection attached.
+///
+/// Separate from [`LimitEntry`] because the two are genuinely different orders.
+/// A `LimitEntry` is PostOnly and carries a stop and target, which is right for
+/// a directional setup. A pair leg is priced *through* the book so it fills now
+/// — PostOnly would be rejected — and has no per-leg stop, because the pair's
+/// stop is a spread z-score that neither leg's price can express.
+///
+/// There is still no market-order equivalent anywhere in the workspace. The
+/// limit-only rule stays enforced by what can be constructed, including on the
+/// unwind path where a market order would be most tempting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitLeg {
+    pub symbol: Symbol,
+    pub side: Side,
+    pub qty: Decimal,
+    pub price: Decimal,
+    /// Deterministic idempotency key, max 36 characters.
+    pub order_link_id: String,
+    /// `true` for a leg that closes an existing position. The exchange then
+    /// refuses to let it open one in the opposite direction, which is what
+    /// makes a duplicate close attempt harmless rather than a new position.
+    pub reduce_only: bool,
+}
+
+/// The exchange's view of one order, resting or terminal.
+///
+/// Distinct from [`OpenOrder`] because it carries `avg_price` — the volume
+/// weighted fill price, which is what a pair position's PnL is computed
+/// against. `OpenOrder::price` is the price the order was *placed* at, and
+/// using it as the entry price would quietly understate slippage on every
+/// trade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderStatus {
+    pub symbol: Symbol,
+    pub order_id: String,
+    pub order_link_id: String,
+    pub side: Side,
+    pub state: OrderState,
+    pub qty: Decimal,
+    pub cum_exec_qty: Decimal,
+    /// Zero when nothing has filled. Bybit sends `""` in that case.
+    pub avg_price: Decimal,
+    pub updated_time_ms: i64,
+}
+
+impl OrderState {
+    /// Whether this order will never change again.
+    ///
+    /// The executor polls until this is true. `PartiallyFilled` is
+    /// deliberately *not* terminal: a partial fill is still working, and
+    /// treating it as done would record a pair position at the wrong size.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            OrderState::Filled | OrderState::Cancelled | OrderState::Rejected
+        )
+    }
+}

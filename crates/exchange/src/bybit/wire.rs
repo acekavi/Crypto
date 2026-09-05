@@ -223,7 +223,7 @@ impl FundingRateRow {
     }
 }
 
-use botcore::{Balance, OpenOrder, OrderState, Position, Side};
+use botcore::{Balance, OpenOrder, OrderState, OrderStatus, Position, Side};
 
 #[derive(Debug, Deserialize)]
 pub struct OrderCreateResult {
@@ -310,6 +310,11 @@ pub struct OpenOrderRow {
     // never fails an order over this field.
     #[serde(rename = "updatedTime", default)]
     pub updated_time: Option<String>,
+    // Empty string when nothing has filled, which is why this is optional and
+    // decodes to zero rather than failing: an unfilled order is a normal state,
+    // not a decode error.
+    #[serde(rename = "avgPrice", default)]
+    pub avg_price: Option<String>,
 }
 
 impl OpenOrderRow {
@@ -350,6 +355,31 @@ impl OpenOrderRow {
             state,
             created_time_ms,
             updated_time_ms,
+        })
+    }
+
+    /// Decode into the richer status shape the pair executor polls on.
+    ///
+    /// Shares `OpenOrderRow` with `into_open_order` rather than introducing a
+    /// second row type, so a Bybit field rename can only break one decoder.
+    pub fn into_order_status(self) -> Result<OrderStatus, ExchangeError> {
+        let symbol = Symbol::new(self.symbol.clone());
+        let side = parse_side(&self.side)?;
+        let avg_price = match self.avg_price.as_deref() {
+            None | Some("") => Decimal::ZERO,
+            Some(s) => req_decimal(s, "avgPrice")?,
+        };
+        let open = self.into_open_order()?;
+        Ok(OrderStatus {
+            symbol,
+            order_id: open.order_id,
+            order_link_id: open.order_link_id,
+            side,
+            state: open.state,
+            qty: open.qty,
+            cum_exec_qty: open.cum_exec_qty,
+            avg_price,
+            updated_time_ms: open.updated_time_ms,
         })
     }
 }
