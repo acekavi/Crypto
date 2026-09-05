@@ -44,6 +44,7 @@ async fn diag_export_trades() {
                 tick_size: dec!(0.0001),
                 qty_step: dec!(0.000001),
                 min_order_qty: dec!(0.000001),
+                min_notional: dec!(5),
                 launch_time_ms: 0,
             })
             .collect(),

@@ -108,6 +108,7 @@ mod tests {
             tick_size: dec!(0.1),
             qty_step: dec!(0.001),
             min_order_qty: dec!(0.001),
+            min_notional: dec!(5),
             launch_time_ms: NOW - age_days * DAY,
         }
     }

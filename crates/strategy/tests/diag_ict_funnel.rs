@@ -49,6 +49,7 @@ async fn diag_ict_funnel() {
                 tick_size: dec!(0.0001),
                 qty_step: dec!(0.000001),
                 min_order_qty: dec!(0.000001),
+                min_notional: dec!(5),
                 launch_time_ms: 0,
             };
             // Merge all four timeframes chronologically, finest first on ties,

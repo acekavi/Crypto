@@ -118,6 +118,10 @@ pub struct LotSizeFilter {
     pub qty_step: String,
     #[serde(rename = "minOrderQty")]
     pub min_order_qty: String,
+    // Absent on some symbols, so it defaults rather than failing the decode:
+    // a symbol with no minimum is a normal state, not a malformed response.
+    #[serde(rename = "minNotionalValue", default)]
+    pub min_notional_value: Option<String>,
 }
 
 impl InstrumentRow {
@@ -136,6 +140,10 @@ impl InstrumentRow {
             tick_size: parse(&self.price_filter.tick_size, "tickSize")?,
             qty_step: parse(&self.lot_size_filter.qty_step, "qtyStep")?,
             min_order_qty: parse(&self.lot_size_filter.min_order_qty, "minOrderQty")?,
+            min_notional: match self.lot_size_filter.min_notional_value.as_deref() {
+                None | Some("") => Decimal::ZERO,
+                Some(s) => parse(s, "minNotionalValue")?,
+            },
             launch_time_ms: self
                 .launch_time
                 .parse::<i64>()

@@ -181,6 +181,7 @@ fn placeholder_instrument(symbol: &Symbol) -> Instrument {
         tick_size: Decimal::new(1, 4),
         qty_step: Decimal::new(1, 6),
         min_order_qty: Decimal::new(1, 6),
+        min_notional: Decimal::from(5),
         launch_time_ms: 0,
     }
 }

@@ -30,6 +30,9 @@ pub struct Instrument {
     pub tick_size: Decimal,
     pub qty_step: Decimal,
     pub min_order_qty: Decimal,
+    /// Minimum order value in the quote currency. Zero when the exchange
+    /// imposes none. Bybit sends this as `lotSizeFilter.minNotionalValue`.
+    pub min_notional: Decimal,
     pub launch_time_ms: i64,
 }
 
@@ -54,6 +57,7 @@ mod tests {
             tick_size: dec!(0.1),
             qty_step: dec!(0.001),
             min_order_qty: dec!(0.001),
+            min_notional: dec!(5),
             launch_time_ms: 1_600_000_000_000,
         }
     }
