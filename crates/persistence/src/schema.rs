@@ -69,6 +69,47 @@ pub const MIGRATIONS: &[&str] = &[
         config_hash   TEXT NOT NULL
     )",
     "CREATE INDEX IF NOT EXISTS idx_trade_events_symbol ON trade_events(symbol, at_ms)",
+    // One row per bot: a pair is flat or it is not, so there is nothing to
+    // accumulate. Decimals are TEXT, matching every other table here — never
+    // ORDER BY them; order by the integer timestamp.
+    "CREATE TABLE IF NOT EXISTS pair_positions (
+        bot_id TEXT PRIMARY KEY,
+        side TEXT NOT NULL,
+        opened_at_ms INTEGER NOT NULL,
+        entry_z TEXT NOT NULL,
+        a_symbol TEXT NOT NULL,
+        a_qty TEXT NOT NULL,
+        a_entry TEXT NOT NULL,
+        a_order_id TEXT NOT NULL,
+        b_symbol TEXT NOT NULL,
+        b_qty TEXT NOT NULL,
+        b_entry TEXT NOT NULL,
+        b_order_id TEXT NOT NULL,
+        breakeven_armed INTEGER NOT NULL,
+        per_leg_notional TEXT NOT NULL,
+        capped_by TEXT
+    )",
+    // Append-only narrative: entries, exits, guard deferrals, unwinds, halts.
+    "CREATE TABLE IF NOT EXISTS pair_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL,
+        at_ms INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        detail TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_pair_events_bot_at ON pair_events (bot_id, at_ms)",
+    // Liveness, replacing the JSON state file's heartbeat fields. Separate
+    // from pair_positions because it is written every loop while a position
+    // changes rarely, and because a heartbeat write must never risk a
+    // position row.
+    "CREATE TABLE IF NOT EXISTS pair_heartbeats (
+        bot_id TEXT PRIMARY KEY,
+        last_bar_ms INTEGER,
+        last_loop_ms INTEGER,
+        last_z TEXT,
+        last_signal TEXT,
+        last_guard_reason TEXT
+    )",
     "CREATE TABLE IF NOT EXISTS candles (
         symbol       TEXT NOT NULL,
         timeframe    TEXT NOT NULL,

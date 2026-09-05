@@ -1,6 +1,6 @@
 # Crypto Portfolio Bot
 
-This repository currently runs a **3-bot statistical-arbitrage testnet portfolio** on Bybit.
+This repository runs a **single-process Rust statistical-arbitrage testnet portfolio** on Bybit.
 
 ## Active live portfolio
 
@@ -33,11 +33,9 @@ This repository currently runs a **3-bot statistical-arbitrage testnet portfolio
 
 These three pairs are intentionally **non-overlapping** at the symbol level so they can share one account without cross-bot leg collisions.
 
-## Active services
+## Active service
 
-- `crypto-bot-aave-eth.service`
-- `crypto-bot-ena-xrp.service`
-- `crypto-bot-bnb-xaut.service`
+- `crypto-pairs.service`
 
 ## Monitoring jobs
 
@@ -51,81 +49,80 @@ These three pairs are intentionally **non-overlapping** at the symbol level so t
 
 ## Important paths
 
-- main bot logic: `scripts/pairs_bot.py`
+- live runtime: `bot/src/bin/pairs.rs`
+- status tool: `bot/src/bin/pairs_status.rs`
+- dashboard tool: `bot/src/bin/pairs_dashboard.rs`
+- backtest tool: `bot/src/bin/pairs_backtest.rs`
+- watchdog tool: `bot/src/bin/pairs_watchdog.rs`
+- daily summary tool: `bot/src/bin/pairs_daily_summary.rs`
+- active config: `config/pairs-testnet.toml`
 - portfolio dashboard: `dashboard/pairs-dashboard.html`
-- dashboard generator: `scripts/render_pairs_dashboard.py`
-- portfolio status script: `scripts/portfolio_status.py`
-- tests: `python_tests/test_pairs_bot.py`, `python_tests/test_portfolio_status.py`
+- repo service file: `deploy/crypto-pairs.service`
 
 ## Status / inspection
 
 ### Portfolio-level status
 ```bash
 cd /home/acekavi/Projects/Crypto
-python scripts/portfolio_status.py
-python scripts/portfolio_status.py --json
+cargo run -q -p bot --bin pairs_status -- testnet
+cargo run -q -p bot --bin pairs_status -- testnet --json
 ```
 
 ### Dashboard refresh
 ```bash
 cd /home/acekavi/Projects/Crypto
-python scripts/render_pairs_dashboard.py
+cargo run -q -p bot --bin pairs_dashboard -- testnet
+```
+
+### Backtest snapshot
+```bash
+cd /home/acekavi/Projects/Crypto
+cargo run -q -p bot --bin pairs_backtest -- testnet --bot-id aave_eth --json
 ```
 
 ### Systemd service status
 ```bash
-systemctl --user list-units 'crypto-bot*' --no-pager
-systemctl --user status crypto-bot-aave-eth.service --no-pager
-systemctl --user status crypto-bot-ena-xrp.service --no-pager
-systemctl --user status crypto-bot-bnb-xaut.service --no-pager
+systemctl --user status crypto-pairs.service --no-pager
+journalctl --user -u crypto-pairs -n 50 --no-pager
 ```
 
 ### Exchange/account sanity checks
 ```bash
 cd /home/acekavi/Projects/Crypto
-PYTHONPATH=/home/acekavi/Projects/Crypto python - <<'PY'
-from scripts.pairs_bot import BybitClient
-c = BybitClient('/home/acekavi/Projects/Crypto/.env')
-print(c.request('GET', '/v5/position/list', {'category': 'linear', 'settleCoin': 'USDT'}))
-print(c.request('GET', '/v5/order/realtime', {'category': 'linear', 'settleCoin': 'USDT'}))
-PY
+cargo run -q -p bot --bin pairs_status -- testnet --json
 ```
 
 ## Restart / rollout commands
 
-### Restart all live portfolio bots
+### Build release runtime
 ```bash
-systemctl --user restart \
-  crypto-bot-aave-eth.service \
-  crypto-bot-ena-xrp.service \
-  crypto-bot-bnb-xaut.service
+cd /home/acekavi/Projects/Crypto
+cargo build --release -p bot --bin crypto-pairs --bin pairs_status --bin pairs_dashboard --bin pairs_backtest --bin pairs_watchdog --bin pairs_daily_summary
 ```
 
-### Start/stop individually
+### Restart the live portfolio runtime
 ```bash
-systemctl --user start crypto-bot-aave-eth.service
-systemctl --user stop crypto-bot-aave-eth.service
+systemctl --user restart crypto-pairs.service
+```
 
-systemctl --user start crypto-bot-ena-xrp.service
-systemctl --user stop crypto-bot-ena-xrp.service
-
-systemctl --user start crypto-bot-bnb-xaut.service
-systemctl --user stop crypto-bot-bnb-xaut.service
+### Start/stop the live runtime
+```bash
+systemctl --user start crypto-pairs.service
+systemctl --user stop crypto-pairs.service
 ```
 
 ## Test commands
 
 ```bash
 cd /home/acekavi/Projects/Crypto
-python -m unittest python_tests.test_pairs_bot
-python -m unittest python_tests.test_portfolio_status
-python -m py_compile scripts/pairs_bot.py scripts/render_pairs_dashboard.py scripts/portfolio_status.py
+cargo test --workspace
+cargo build --release -p bot --bin crypto-pairs --bin pairs_status --bin pairs_dashboard --bin pairs_backtest --bin pairs_watchdog --bin pairs_daily_summary
 ```
 
 ## Rollback note
 
-This repo no longer keeps the old DOGE/XRP and LINK/XRP live stack in active service files or Hermes monitor wrappers. Rolling back to that prior live portfolio would require recreating those files from git history and re-installing the services/cron jobs.
+This repo no longer keeps the old multi-service Python live path as the primary runtime. Rolling back means restoring the retired Python files and per-pair systemd units from git history, then reinstalling them.
 
 ## Reality check
 
-The active portfolio is still a **testnet paper-trading setup**. Backtests looked strong, but live behavior can diverge because of slippage, two-leg execution risk, funding drift, and regime change. Use the dashboard and `portfolio_status.py` as routine sanity checks, not as proof the edge is permanent.
+The active portfolio is still a **testnet paper-trading setup**. Backtests looked strong, but live behavior can diverge because of slippage, two-leg execution risk, funding drift, and regime change. Use the dashboard and `pairs_status` as routine sanity checks, not as proof the edge is permanent.

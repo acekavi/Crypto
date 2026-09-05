@@ -1,0 +1,22 @@
+# All configured statistical-arbitrage pairs, one process.
+
+[Unit]
+Description=Crypto pairs bot (Bybit testnet, all configured pairs)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/var/home/acekavi/Projects/Crypto
+EnvironmentFile=/var/home/acekavi/Projects/Crypto/.env
+ExecStart=/var/home/acekavi/Projects/Crypto/target/release/crypto-pairs testnet
+Restart=always
+RestartSec=10s
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crypto-pairs
+
+[Install]
+WantedBy=default.target

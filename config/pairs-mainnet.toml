@@ -1,0 +1,67 @@
+[runtime]
+loop_seconds = 60
+journal_path = "data/bot-mainnet.db"
+kline_margin_bars = 25
+
+[executor]
+ticks_through = 5
+fill_timeout_secs = 20
+poll_interval_secs = 1
+unwind_ladder = [10, 25, 60]
+
+[[bot]]
+id = "aave_eth"
+name = "AAVE/ETH"
+priority = 100
+leg_a = "AAVEUSDT"
+leg_b = "ETHUSDT"
+timeframe = "H1"
+rolling_window = 180
+entry_z = 3.0
+stop_z = 4.0
+target_z = 0.0
+max_hold_bars = 48
+fee_per_leg = 0.0002
+per_leg_notional_usdt = 25
+risk_pct_of_equity = 0.03
+max_notional_multiple_of_equity = 1.0
+enable_breakeven = false
+breakeven_r_multiple = 2.0
+
+[[bot]]
+id = "ena_xrp"
+name = "ENA/XRP"
+priority = 90
+leg_a = "ENAUSDT"
+leg_b = "XRPUSDT"
+timeframe = "H1"
+rolling_window = 336
+entry_z = 3.25
+stop_z = 4.5
+target_z = -0.5
+max_hold_bars = 96
+fee_per_leg = 0.0002
+per_leg_notional_usdt = 25
+risk_pct_of_equity = 0.03
+max_notional_multiple_of_equity = 1.0
+enable_breakeven = false
+breakeven_r_multiple = 2.0
+
+[[bot]]
+id = "bnb_xaut"
+name = "BNB/XAUT"
+priority = 80
+leg_a = "BNBUSDT"
+leg_b = "XAUTUSDT"
+timeframe = "H1"
+rolling_window = 240
+entry_z = 3.0
+stop_z = 4.5
+target_z = -4.5
+max_hold_bars = 96
+fee_per_leg = 0.0002
+per_leg_notional_usdt = 25
+risk_pct_of_equity = 0.03
+max_notional_multiple_of_equity = 1.0
+enable_breakeven = false
+breakeven_r_multiple = 2.0

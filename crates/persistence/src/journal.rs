@@ -190,6 +190,90 @@ pub struct TradeEvent {
     pub config_hash: String,
 }
 
+/// One row per bot when a pair position exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairPositionRecord {
+    pub bot_id: String,
+    pub side: String,
+    pub opened_at_ms: i64,
+    pub entry_z: Decimal,
+    pub a_symbol: Symbol,
+    pub a_qty: Decimal,
+    pub a_entry: Decimal,
+    pub a_order_id: String,
+    pub b_symbol: Symbol,
+    pub b_qty: Decimal,
+    pub b_entry: Decimal,
+    pub b_order_id: String,
+    pub breakeven_armed: bool,
+    pub per_leg_notional: Decimal,
+    pub capped_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairEventKind {
+    Entry,
+    Exit,
+    EntrySkipped,
+    Unwound,
+    UnwindFailed,
+    Reconciled,
+    Halted,
+}
+
+impl PairEventKind {
+    pub const ALL: [PairEventKind; 7] = [
+        PairEventKind::Entry,
+        PairEventKind::Exit,
+        PairEventKind::EntrySkipped,
+        PairEventKind::Unwound,
+        PairEventKind::UnwindFailed,
+        PairEventKind::Reconciled,
+        PairEventKind::Halted,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PairEventKind::Entry => "Entry",
+            PairEventKind::Exit => "Exit",
+            PairEventKind::EntrySkipped => "EntrySkipped",
+            PairEventKind::Unwound => "Unwound",
+            PairEventKind::UnwindFailed => "UnwindFailed",
+            PairEventKind::Reconciled => "Reconciled",
+            PairEventKind::Halted => "Halted",
+        }
+    }
+}
+
+impl std::str::FromStr for PairEventKind {
+    type Err = JournalError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        PairEventKind::ALL
+            .into_iter()
+            .find(|k| k.as_str() == s)
+            .ok_or_else(|| JournalError::Decode(format!("unknown pair event kind {s}")))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairEvent {
+    pub bot_id: String,
+    pub at_ms: i64,
+    pub kind: PairEventKind,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairHeartbeat {
+    pub bot_id: String,
+    pub last_bar_ms: Option<i64>,
+    pub last_loop_ms: Option<i64>,
+    pub last_z: Option<Decimal>,
+    pub last_signal: Option<String>,
+    pub last_guard_reason: Option<String>,
+}
+
 fn state_str(s: OrderState) -> &'static str {
     match s {
         OrderState::New => "New",
@@ -631,6 +715,177 @@ impl Journal {
     pub async fn event_count(&self) -> Result<i64, JournalError> {
         self.scalar_i64("SELECT COUNT(*) FROM trade_events", ())
             .await
+    }
+
+    pub async fn upsert_pair_position(&self, p: &PairPositionRecord) -> Result<(), JournalError> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO pair_positions
+                 (bot_id, side, opened_at_ms, entry_z, a_symbol, a_qty, a_entry, a_order_id,
+                  b_symbol, b_qty, b_entry, b_order_id, breakeven_armed, per_leg_notional, capped_by)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                (
+                    p.bot_id.clone(),
+                    p.side.clone(),
+                    p.opened_at_ms,
+                    p.entry_z.to_string(),
+                    p.a_symbol.as_str().to_string(),
+                    p.a_qty.to_string(),
+                    p.a_entry.to_string(),
+                    p.a_order_id.clone(),
+                    p.b_symbol.as_str().to_string(),
+                    p.b_qty.to_string(),
+                    p.b_entry.to_string(),
+                    p.b_order_id.clone(),
+                    i64::from(p.breakeven_armed),
+                    p.per_leg_notional.to_string(),
+                    p.capped_by.clone(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn pair_position(&self, bot_id: &str) -> Result<Option<PairPositionRecord>, JournalError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT bot_id, side, opened_at_ms, entry_z, a_symbol, a_qty, a_entry, a_order_id,
+                        b_symbol, b_qty, b_entry, b_order_id, breakeven_armed, per_leg_notional, capped_by
+                 FROM pair_positions WHERE bot_id = ?1",
+                (bot_id.to_string(),),
+            )
+            .await?;
+
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let get_text = |i: usize| -> Result<String, JournalError> {
+            row.get_value(i)
+                .map_err(|e| JournalError::Db(e.to_string()))?
+                .as_text()
+                .map(|s| s.to_string())
+                .ok_or_else(|| JournalError::Decode(format!("column {i} is not text")))
+        };
+        let get_int = |i: usize, field: &str| -> Result<i64, JournalError> {
+            row.get_value(i)
+                .map_err(|e| JournalError::Db(e.to_string()))?
+                .as_integer()
+                .copied()
+                .ok_or_else(|| JournalError::Decode(format!("{field} is not an integer")))
+        };
+
+        Ok(Some(PairPositionRecord {
+            bot_id: get_text(0)?,
+            side: get_text(1)?,
+            opened_at_ms: get_int(2, "opened_at_ms")?,
+            entry_z: parse_dec(&get_text(3)?, "entry_z")?,
+            a_symbol: Symbol::new(get_text(4)?),
+            a_qty: parse_dec(&get_text(5)?, "a_qty")?,
+            a_entry: parse_dec(&get_text(6)?, "a_entry")?,
+            a_order_id: get_text(7)?,
+            b_symbol: Symbol::new(get_text(8)?),
+            b_qty: parse_dec(&get_text(9)?, "b_qty")?,
+            b_entry: parse_dec(&get_text(10)?, "b_entry")?,
+            b_order_id: get_text(11)?,
+            breakeven_armed: get_int(12, "breakeven_armed")? != 0,
+            per_leg_notional: parse_dec(&get_text(13)?, "per_leg_notional")?,
+            capped_by: row
+                .get_value(14)
+                .ok()
+                .and_then(|v| v.as_text().map(|s| s.to_string())),
+        }))
+    }
+
+    pub async fn clear_pair_position(&self, bot_id: &str) -> Result<(), JournalError> {
+        self.conn
+            .execute(
+                "DELETE FROM pair_positions WHERE bot_id = ?1",
+                (bot_id.to_string(),),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn record_pair_event(&self, e: &PairEvent) -> Result<(), JournalError> {
+        self.conn
+            .execute(
+                "INSERT INTO pair_events (bot_id, at_ms, kind, detail) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    e.bot_id.clone(),
+                    e.at_ms,
+                    e.kind.as_str().to_string(),
+                    e.detail.clone(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn upsert_pair_heartbeat(&self, hb: &PairHeartbeat) -> Result<(), JournalError> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO pair_heartbeats
+                 (bot_id, last_bar_ms, last_loop_ms, last_z, last_signal, last_guard_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    hb.bot_id.clone(),
+                    hb.last_bar_ms,
+                    hb.last_loop_ms,
+                    hb.last_z.map(|d| d.to_string()),
+                    hb.last_signal.clone(),
+                    hb.last_guard_reason.clone(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn pair_heartbeat(&self, bot_id: &str) -> Result<Option<PairHeartbeat>, JournalError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT bot_id, last_bar_ms, last_loop_ms, last_z, last_signal, last_guard_reason
+                 FROM pair_heartbeats WHERE bot_id = ?1",
+                (bot_id.to_string(),),
+            )
+            .await?;
+
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let get_text = |i: usize| -> Result<String, JournalError> {
+            row.get_value(i)
+                .map_err(|e| JournalError::Db(e.to_string()))?
+                .as_text()
+                .map(|s| s.to_string())
+                .ok_or_else(|| JournalError::Decode(format!("column {i} is not text")))
+        };
+        let get_opt_int = |i: usize| -> Result<Option<i64>, JournalError> {
+            Ok(row
+                .get_value(i)
+                .map_err(|e| JournalError::Db(e.to_string()))?
+                .as_integer()
+                .copied())
+        };
+        let last_z = match row.get_value(3).map_err(|e| JournalError::Db(e.to_string()))?.as_text() {
+            Some(s) => Some(parse_dec(s, "last_z")?),
+            None => None,
+        };
+        Ok(Some(PairHeartbeat {
+            bot_id: get_text(0)?,
+            last_bar_ms: get_opt_int(1)?,
+            last_loop_ms: get_opt_int(2)?,
+            last_z,
+            last_signal: row
+                .get_value(4)
+                .ok()
+                .and_then(|v| v.as_text().map(|s| s.to_string())),
+            last_guard_reason: row
+                .get_value(5)
+                .ok()
+                .and_then(|v| v.as_text().map(|s| s.to_string())),
+        }))
     }
 
     /// Test-only: make every protection and trade-event write fail from here

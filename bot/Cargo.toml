@@ -12,6 +12,10 @@ path = "src/main.rs"
 name = "download-history"
 path = "src/bin/download_history.rs"
 
+[[bin]]
+name = "crypto-pairs"
+path = "src/bin/pairs.rs"
+
 [lib]
 name = "bot"
 path = "src/lib.rs"
@@ -22,11 +26,13 @@ engine = { path = "../crates/engine" }
 exchange = { path = "../crates/exchange" }
 history = { path = "../crates/history" }
 indicators = { path = "../crates/indicators" }
+pairs = { path = "../crates/pairs" }
 persistence = { path = "../crates/persistence" }
 risk = { path = "../crates/risk" }
 strategy = { path = "../crates/strategy" }
 rust_decimal.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2 = "0.10"
 hex = "0.4"
 thiserror.workspace = true
@@ -35,8 +41,10 @@ toml = "0.8"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [dev-dependencies]
+async-trait = "0.1"
 rust_decimal_macros.workspace = true
 temp-env = "0.3"
 tempfile = "3"
