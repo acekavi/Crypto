@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,8 +11,7 @@ use exchange::ExchangeClient;
 use exchange::bybit::rest::BybitRest;
 use exchange::bybit::sign::Credentials;
 use pairs::{RollingZ, SignalEngine};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const HISTORY_DB: &str = "/home/acekavi/Projects/Crypto/data/history.db";
 const DASHBOARD_HTML: &str = "/home/acekavi/Projects/Crypto/dashboard/pairs-dashboard.html";
@@ -27,7 +26,7 @@ pub enum ReportError {
     #[error(transparent)]
     Exchange(#[from] exchange::bybit::transport::ExchangeError),
     #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Backtest(#[from] crate::pairs_backtest::PairBacktestError),
     #[error(transparent)]
@@ -55,7 +54,7 @@ pub struct ServiceStatus {
     pub fragment_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePositionView {
     pub side: String,
     pub opened_at_ms: i64,
@@ -65,7 +64,9 @@ pub struct RuntimePositionView {
     pub breakeven_armed: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+pub const SNAPSHOT_STALE_AFTER_S: f64 = 600.0;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeStateView {
     pub last_bar_ms: Option<i64>,
     pub last_loop_wall_time: Option<f64>,
@@ -73,6 +74,12 @@ pub struct RuntimeStateView {
     pub last_seen_signal: Option<String>,
     pub last_guard_reason: Option<String>,
     pub position: Option<RuntimePositionView>,
+    #[serde(default)]
+    pub loaded_params: Option<LoadedParamsView>,
+    #[serde(default)]
+    pub snapshot_age_s: Option<f64>,
+    #[serde(default)]
+    pub snapshot_stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,12 +108,23 @@ pub struct BotStatus {
     pub pair: String,
     pub priority: u32,
     pub risk_pct_of_equity: String,
+    pub loaded_params: LoadedParamsView,
     pub latest_bar_ms: Option<i64>,
     pub latest_z: Option<f64>,
     pub current_signal: Option<String>,
     pub signal_error: Option<String>,
     pub runtime_state: RuntimeStateView,
     pub backtest: Option<SplitBacktestSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadedParamsView {
+    pub rolling_window: usize,
+    pub entry_z: String,
+    pub stop_z: String,
+    pub target_z: String,
+    pub max_hold_bars: i64,
+    pub risk_pct_of_equity: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,6 +214,29 @@ pub fn build_portfolio_manifest(bots: &[BotConfig]) -> Manifest {
     }
 }
 
+pub fn loaded_params_view(bot: &BotConfig) -> LoadedParamsView {
+    LoadedParamsView {
+        rolling_window: bot.params.rolling_window,
+        entry_z: bot.params.entry_z.to_string(),
+        stop_z: bot.params.stop_z.to_string(),
+        target_z: bot.params.target_z.to_string(),
+        max_hold_bars: bot.params.max_hold_bars,
+        risk_pct_of_equity: bot.params.risk_pct_of_equity.to_string(),
+    }
+}
+
+pub fn format_loaded_params(params: &LoadedParamsView) -> String {
+    format!(
+        "window={} entry={} stop={} target={} hold={} risk={}",
+        params.rolling_window,
+        params.entry_z,
+        params.stop_z,
+        params.target_z,
+        params.max_hold_bars,
+        params.risk_pct_of_equity,
+    )
+}
+
 fn position_view(p: &Position) -> PositionView {
     PositionView {
         symbol: p.symbol.to_string(),
@@ -217,6 +258,26 @@ fn order_view(o: &OpenOrder) -> OrderView {
     }
 }
 
+pub fn runtime_snapshot_path(db_path: &str) -> PathBuf {
+    let base = Path::new(db_path);
+    base.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("pairs-runtime-snapshot.json")
+}
+
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("snapshot"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 fn empty_runtime_state() -> RuntimeStateView {
     RuntimeStateView {
         last_bar_ms: None,
@@ -225,59 +286,34 @@ fn empty_runtime_state() -> RuntimeStateView {
         last_seen_signal: None,
         last_guard_reason: None,
         position: None,
+        loaded_params: None,
+        snapshot_age_s: None,
+        snapshot_stale: true,
     }
 }
 
-fn read_runtime_state(db_path: &str, bot_id: &str) -> Result<RuntimeStateView, ReportError> {
-    if !Path::new(db_path).exists() {
-        return Ok(empty_runtime_state());
-    }
-    let conn = Connection::open_with_flags(
-        format!("file:{db_path}?mode=ro&immutable=1"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-
-    let hb = conn
-        .query_row(
-            "SELECT last_bar_ms, last_loop_ms, last_z, last_signal, last_guard_reason FROM pair_heartbeats WHERE bot_id = ?1",
-            [bot_id],
-            |row| {
-                let last_loop_ms: Option<i64> = row.get(1)?;
-                let last_z_text: Option<String> = row.get(2)?;
-                Ok(RuntimeStateView {
-                    last_bar_ms: row.get(0)?,
-                    last_loop_wall_time: last_loop_ms.map(|ms| ms as f64 / 1000.0),
-                    last_seen_z: last_z_text.and_then(|s| s.parse::<f64>().ok()),
-                    last_seen_signal: row.get(3)?,
-                    last_guard_reason: row.get(4)?,
-                    position: None,
-                })
-            },
-        )
-        .optional()?
-        .unwrap_or_else(empty_runtime_state);
-
-    let pos = conn
-        .query_row(
-            "SELECT side, opened_at_ms, entry_z, per_leg_notional, capped_by, breakeven_armed FROM pair_positions WHERE bot_id = ?1",
-            [bot_id],
-            |row| {
-                Ok(RuntimePositionView {
-                    side: row.get(0)?,
-                    opened_at_ms: row.get(1)?,
-                    entry_z: row.get::<_, String>(2)?,
-                    per_leg_notional_usdt: row.get::<_, String>(3)?,
-                    capped_by: row.get(4)?,
-                    breakeven_armed: row.get::<_, i64>(5)? != 0,
-                })
-            },
-        )
-        .optional()?;
-
-    Ok(RuntimeStateView {
-        position: pos,
-        ..hb
-    })
+pub fn read_runtime_state(
+    db_path: &str,
+    bot_id: &str,
+    stale_after_s: f64,
+) -> Result<RuntimeStateView, ReportError> {
+    let path = runtime_snapshot_path(db_path);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(empty_runtime_state()),
+        Err(e) => return Err(ReportError::Io(e)),
+    };
+    let age = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|m| SystemTime::now().duration_since(m).ok())
+        .map(|d| d.as_secs_f64());
+    let stale = age.is_none_or(|a| a > stale_after_s);
+    let states: std::collections::HashMap<String, RuntimeStateView> = serde_json::from_str(&text)?;
+    let mut state = states.get(bot_id).cloned().unwrap_or_else(empty_runtime_state);
+    state.snapshot_age_s = age;
+    state.snapshot_stale = stale;
+    Ok(state)
 }
 
 async fn latest_signal(rest: &BybitRest, bot: &BotConfig, margin: u16) -> Result<(Option<i64>, Option<f64>, Option<String>), ReportError> {
@@ -326,7 +362,11 @@ pub async fn collect_status(profile: Profile, with_backtests: bool) -> Result<Po
             Ok((bar, z, sig)) => (bar, z, sig, None),
             Err(e) => (None, None, None, Some(e.to_string())),
         };
-        let runtime_state = read_runtime_state(&cfg.runtime.journal_path, &bot.id)?;
+        let runtime_state = read_runtime_state(
+            &cfg.runtime.journal_path,
+            &bot.id,
+            SNAPSHOT_STALE_AFTER_S,
+        )?;
         let backtest = if with_backtests {
             Some(split_summary(HISTORY_DB, &bot.params, 0.70).await?)
         } else {
@@ -338,6 +378,7 @@ pub async fn collect_status(profile: Profile, with_backtests: bool) -> Result<Po
             pair: format!("{}/{}", bot.params.leg_a, bot.params.leg_b),
             priority: bot.priority,
             risk_pct_of_equity: bot.params.risk_pct_of_equity.to_string(),
+            loaded_params: loaded_params_view(bot),
             latest_bar_ms,
             latest_z,
             current_signal,
@@ -385,8 +426,23 @@ pub fn render_text(status: &PortfolioStatus) -> String {
             bot.current_signal, bot.latest_z, bot.latest_bar_ms
         ));
         lines.push(format!(
-            "  runtime last_seen_signal: {:?} | guard: {:?}",
-            bot.runtime_state.last_seen_signal, bot.runtime_state.last_guard_reason
+            "  runtime last_seen_signal: {:?} | guard: {:?} | snapshot_age_s: {:?} | snapshot_stale: {}",
+            bot.runtime_state.last_seen_signal,
+            bot.runtime_state.last_guard_reason,
+            bot.runtime_state.snapshot_age_s.map(|v| v.round() as i64),
+            bot.runtime_state.snapshot_stale,
+        ));
+        lines.push(format!(
+            "  loaded params: {}",
+            format_loaded_params(&bot.loaded_params),
+        ));
+        lines.push(format!(
+            "  runtime params: {}",
+            bot.runtime_state
+                .loaded_params
+                .as_ref()
+                .map(format_loaded_params)
+                .unwrap_or_else(|| "unavailable".to_string()),
         ));
         lines.push(format!("  local position: {:?}", bot.runtime_state.position.as_ref().map(|p| &p.side)));
         if let Some(err) = &bot.signal_error {
@@ -410,14 +466,17 @@ pub fn render_dashboard_html(status: &PortfolioStatus) -> String {
                 b.full.max_drawdown_pct
             )).unwrap_or_default();
             let pos = bot.runtime_state.position.as_ref().map(|p| format!("{} @ z={} notional={}", p.side, p.entry_z, p.per_leg_notional_usdt)).unwrap_or_else(|| "flat".to_string());
+            let snap_age = bot.runtime_state.snapshot_age_s.map(|v| format!("{v:.0}s")).unwrap_or_else(|| "n/a".to_string());
             format!(
-                "<section class=\"card\"><h2>{}</h2><p class=\"sub\">{}</p><div class=\"metrics\"><div><strong>signal</strong><span>{}</span></div><div><strong>z</strong><span>{}</span></div><div><strong>bar</strong><span>{}</span></div><div><strong>risk</strong><span>{}</span></div></div><p><strong>runtime:</strong> {}</p><p><strong>guard:</strong> {}</p>{}</section>",
+                "<section class=\"card\"><h2>{}</h2><p class=\"sub\">{}</p><div class=\"metrics\"><div><strong>signal</strong><span>{}</span></div><div><strong>z</strong><span>{}</span></div><div><strong>bar</strong><span>{}</span></div><div><strong>risk</strong><span>{}</span></div><div><strong>snapshot age</strong><span>{}</span></div><div><strong>snapshot stale</strong><span>{}</span></div></div><p><strong>runtime:</strong> {}</p><p><strong>guard:</strong> {}</p>{}</section>",
                 html_escape(&bot.name),
                 html_escape(&bot.pair),
                 html_escape(bot.current_signal.as_deref().unwrap_or("none")),
                 bot.latest_z.map(|z| format!("{z:.4}")).unwrap_or_else(|| "n/a".into()),
                 bot.latest_bar_ms.map(|ms| ms.to_string()).unwrap_or_else(|| "n/a".into()),
                 html_escape(&bot.risk_pct_of_equity),
+                html_escape(&snap_age),
+                if bot.runtime_state.snapshot_stale { "yes" } else { "no" },
                 html_escape(&pos),
                 html_escape(bot.runtime_state.last_guard_reason.as_deref().unwrap_or("none")),
                 bt,
@@ -457,6 +516,6 @@ pub async fn write_dashboard(profile: Profile) -> Result<String, ReportError> {
     let status = collect_status(profile, true).await?;
     let html = render_dashboard_html(&status);
     std::fs::create_dir_all(Path::new(DASHBOARD_HTML).parent().expect("dashboard dir"))?;
-    std::fs::write(DASHBOARD_HTML, html)?;
+    atomic_write(Path::new(DASHBOARD_HTML), html.as_bytes())?;
     Ok(DASHBOARD_HTML.to_string())
 }

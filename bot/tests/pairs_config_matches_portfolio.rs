@@ -92,7 +92,7 @@ fn duplicate_priorities_are_rejected_at_load() {
 #[test]
 fn a_stop_inside_the_entry_band_is_rejected_at_load() {
     let src = std::fs::read_to_string(config_path("pairs-testnet.toml")).unwrap();
-    let broken = src.replace("stop_z = 4.0", "stop_z = 2.0");
+    let broken = src.replacen("stop_z = 4.5", "stop_z = 2.0", 1);
     let err = parse_pairs_config(&broken).expect_err("an inverted band must be refused");
     assert!(format!("{err}").contains("stop_z"));
 }

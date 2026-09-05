@@ -1,12 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bot::config::Profile;
 use bot::envfile::load_env_file;
-use bot::pairs_report::collect_status;
+use bot::pairs_report::{SNAPSHOT_STALE_AFTER_S, atomic_write, collect_status};
 use serde::{Deserialize, Serialize};
 
-const STALL_THRESHOLD_S: f64 = 10.0 * 60.0;
+const STALL_THRESHOLD_S: f64 = SNAPSHOT_STALE_AFTER_S;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct WatchState {
@@ -31,11 +31,12 @@ fn load_state(path: &PathBuf) -> WatchState {
         .unwrap_or_default()
 }
 
-fn save_state(path: &PathBuf, state: &WatchState) -> Result<(), std::io::Error> {
+fn save_state(path: &Path, state: &WatchState) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(state)?)
+    let bytes = serde_json::to_vec_pretty(state)?;
+    atomic_write(path, &bytes)
 }
 
 #[tokio::main]
@@ -83,10 +84,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let heartbeat = bot.runtime_state.last_loop_wall_time;
-    let stale_now = heartbeat.is_none_or(|ts| (now - ts) > STALL_THRESHOLD_S);
+    let stale_now = bot.runtime_state.snapshot_stale
+        || heartbeat.is_none_or(|ts| (now - ts) > STALL_THRESHOLD_S);
     if stale_now && !prior.stall_alert_active {
-        let age = heartbeat.map(|ts| (now - ts) as i64);
-        alerts.push(format!("{} bot WARNING: stalled heartbeat. last_loop_age_s={:?}.", bot.name, age));
+        let age = bot
+            .runtime_state
+            .snapshot_age_s
+            .or_else(|| heartbeat.map(|ts| now - ts))
+            .map(|ts| ts as i64);
+        alerts.push(format!("{} bot WARNING: stale runtime visibility. snapshot_or_loop_age_s={:?}.", bot.name, age));
         prior.stall_alert_active = true;
     } else if !stale_now && prior.stall_alert_active {
         alerts.push(format!("{} bot RECOVERED: heartbeat advancing again.", bot.name));
