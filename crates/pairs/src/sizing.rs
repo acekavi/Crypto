@@ -50,7 +50,12 @@ pub fn per_leg_notional(
     available_equity: Decimal,
     spread_sigma: f64,
 ) -> Result<Sizing, SizingError> {
-    if spread_sigma <= 0.0 {
+    // Explicitly finite, not merely `<= 0.0`. A NaN sigma would slip past a
+    // bare comparison and only be caught downstream by `Decimal::from_str`
+    // rejecting the string "NaN" — correct by coincidence rather than by
+    // construction, and untested. Sizing decides how much money goes on the
+    // table; it refuses a sigma it cannot reason about, at the door.
+    if !spread_sigma.is_finite() || spread_sigma <= 0.0 {
         return Err(SizingError::NonPositiveSigma);
     }
     let sigma =
@@ -154,6 +159,19 @@ mod tests {
             per_leg_notional(&params(), dec!(10000), dec!(10000), -0.01),
             Err(SizingError::NonPositiveSigma)
         );
+    }
+
+    #[test]
+    fn a_non_finite_sigma_is_refused_at_the_guard_rather_than_downstream() {
+        // NaN and infinity must be rejected by the guard itself, not by
+        // Decimal::from_str happening to reject the strings "NaN" and "inf".
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                per_leg_notional(&params(), dec!(10000), dec!(10000), bad),
+                Err(SizingError::NonPositiveSigma),
+                "sigma {bad} was not refused"
+            );
+        }
     }
 
     #[test]
