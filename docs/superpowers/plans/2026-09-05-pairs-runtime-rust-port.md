@@ -1000,6 +1000,19 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_sigma_is_refused_at_the_guard_rather_than_downstream() {
+        // NaN and infinity must be rejected by the guard itself, not by
+        // Decimal::from_str happening to reject the strings "NaN" and "inf".
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                per_leg_notional(&params(), dec!(10000), dec!(10000), bad),
+                Err(SizingError::NonPositiveSigma),
+                "sigma {bad} was not refused"
+            );
+        }
+    }
+
+    #[test]
     fn a_drained_account_is_refused_rather_than_sending_a_zero_qty_order() {
         assert_eq!(
             per_leg_notional(&params(), dec!(10000), dec!(0), 0.05),
@@ -1079,7 +1092,13 @@ pub fn per_leg_notional(
     available_equity: Decimal,
     spread_sigma: f64,
 ) -> Result<Sizing, SizingError> {
-    if !(spread_sigma > 0.0) {
+    // Explicitly finite, not merely `<= 0.0`. A NaN sigma slips past a bare
+    // comparison and is then caught only by `Decimal::from_str` rejecting the
+    // string "NaN" — correct by coincidence rather than by construction. Sizing
+    // decides how much money goes on the table; it refuses a sigma it cannot
+    // reason about, at the door. (`!(x > 0.0)` would also catch NaN, but trips
+    // clippy's `neg_cmp_op_on_partial_ord` and this workspace builds -D warnings.)
+    if !spread_sigma.is_finite() || spread_sigma <= 0.0 {
         return Err(SizingError::NonPositiveSigma);
     }
     let sigma =
@@ -1121,7 +1140,7 @@ pub use sizing::{CapReason, Sizing, SizingError, per_leg_notional};
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p pairs`
-Expected: PASS, 28 tests.
+Expected: PASS, 29 tests.
 
 - [ ] **Step 5: Lint and commit**
 
