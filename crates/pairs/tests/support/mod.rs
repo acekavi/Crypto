@@ -42,6 +42,7 @@ pub struct FaultExchange {
     quotes: Mutex<HashMap<String, (Decimal, Decimal)>>,
     positions: Mutex<HashMap<String, Decimal>>,
     candles: Mutex<HashMap<String, Vec<Candle>>>,
+    kline_calls: Mutex<usize>,
 }
 
 #[allow(dead_code)]
@@ -109,6 +110,10 @@ impl FaultExchange {
                 Side::Sell => -o.cum_exec_qty,
             })
             .sum()
+    }
+
+    pub fn kline_call_count(&self) -> usize {
+        *self.kline_calls.lock().unwrap()
     }
 
     fn next_action(&self, symbol: &str) -> LegAction {
@@ -334,6 +339,7 @@ impl ExchangeClient for FaultExchange {
         _tf: Timeframe,
         l: u16,
     ) -> Result<Vec<Candle>, ExchangeError> {
+        *self.kline_calls.lock().unwrap() += 1;
         let mut out = self
             .candles
             .lock()

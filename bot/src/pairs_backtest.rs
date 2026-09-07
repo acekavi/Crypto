@@ -155,16 +155,47 @@ pub struct PromotionDecision {
     pub reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BacktestExperiment {
+    TrailingStop { arm_r: f64, giveback_r: f64 },
+    AddOn { trigger_r: f64, add_on_fraction: f64 },
+}
+
+impl BacktestExperiment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BacktestExperiment::TrailingStop { .. } => "trailing_stop",
+            BacktestExperiment::AddOn { .. } => "add_on",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SimLot {
+    a0: f64,
+    b0: f64,
+    per_leg_notional: f64,
+}
+
 #[derive(Debug, Clone)]
 struct SimPosition {
     side: PairSide,
     entry_ms: i64,
     entry_z: f64,
-    a0: f64,
-    b0: f64,
     age: i64,
     breakeven_armed: bool,
-    per_leg_notional: f64,
+    lots: Vec<SimLot>,
+    best_favorable_z: f64,
+    trailing_armed: bool,
+    trailing_stop_z: Option<f64>,
+    add_on_fired: bool,
+}
+
+impl SimPosition {
+    fn total_per_leg_notional(&self) -> f64 {
+        self.lots.iter().map(|lot| lot.per_leg_notional).sum()
+    }
 }
 
 fn dec_from_f64(v: f64, field: &str) -> Result<Decimal, PairBacktestError> {
@@ -251,16 +282,13 @@ pub async fn run_backtest(
         .zip(&b_prices)
         .map(|(a, b)| a.ln() - b.ln())
         .collect();
-    let engine = SignalEngine::new(params.clone());
     let mut rz = RollingZ::new(params.rolling_window);
 
-    let mut wins = 0usize;
-    let mut losses = 0usize;
-    let mut gross_profit = 0.0;
-    let mut gross_loss = 0.0;
-    let mut equity = 1.0;
-    let mut position: Option<SimPosition> = None;
-    let mut trades = Vec::new();
+    let mut sim_times = Vec::new();
+    let mut sim_z = Vec::new();
+    let mut sim_a = Vec::new();
+    let mut sim_b = Vec::new();
+    let mut sim_sigma = Vec::new();
 
     for i in 0..times.len() {
         let ms = times[i];
@@ -275,8 +303,111 @@ pub async fn run_backtest(
         let Some(stats) = rz.push(spreads[i]) else {
             continue;
         };
-        let z = stats.z;
-        let sigma = stats.sd;
+        sim_times.push(ms);
+        sim_z.push(stats.z);
+        sim_a.push(a_prices[i]);
+        sim_b.push(b_prices[i]);
+        sim_sigma.push(stats.sd);
+    }
+
+    run_backtest_on_series_with_sigmas(params, &sim_times, &sim_z, &sim_a, &sim_b, &sim_sigma, None)
+}
+
+pub fn run_backtest_on_series(
+    params: &PairParams,
+    times: &[i64],
+    z_scores: &[f64],
+    a_prices: &[f64],
+    b_prices: &[f64],
+    experiment: Option<BacktestExperiment>,
+) -> Result<BacktestResult, PairBacktestError> {
+    let sigmas = vec![1.0; times.len()];
+    run_backtest_on_series_with_sigmas(params, times, z_scores, a_prices, b_prices, &sigmas, experiment)
+}
+
+pub async fn run_backtest_with_experiment(
+    db_path: &str,
+    params: &PairParams,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    experiment: Option<BacktestExperiment>,
+) -> Result<BacktestResult, PairBacktestError> {
+    let (times, a_prices, b_prices) = load_pair_series_from_db(db_path, params).await?;
+    let spreads: Vec<f64> = a_prices
+        .iter()
+        .zip(&b_prices)
+        .map(|(a, b)| a.ln() - b.ln())
+        .collect();
+    let mut rz = RollingZ::new(params.rolling_window);
+
+    let mut sim_times = Vec::new();
+    let mut sim_z = Vec::new();
+    let mut sim_a = Vec::new();
+    let mut sim_b = Vec::new();
+    let mut sim_sigma = Vec::new();
+
+    for i in 0..times.len() {
+        let ms = times[i];
+        if start_ms.is_some_and(|start| ms < start) {
+            let _ = rz.push(spreads[i]);
+            continue;
+        }
+        if end_ms.is_some_and(|end| ms >= end) {
+            let _ = rz.push(spreads[i]);
+            continue;
+        }
+        let Some(stats) = rz.push(spreads[i]) else {
+            continue;
+        };
+        sim_times.push(ms);
+        sim_z.push(stats.z);
+        sim_a.push(a_prices[i]);
+        sim_b.push(b_prices[i]);
+        sim_sigma.push(stats.sd);
+    }
+
+    run_backtest_on_series_with_sigmas(
+        params,
+        &sim_times,
+        &sim_z,
+        &sim_a,
+        &sim_b,
+        &sim_sigma,
+        experiment,
+    )
+}
+
+fn run_backtest_on_series_with_sigmas(
+    params: &PairParams,
+    times: &[i64],
+    z_scores: &[f64],
+    a_prices: &[f64],
+    b_prices: &[f64],
+    sigmas: &[f64],
+    experiment: Option<BacktestExperiment>,
+) -> Result<BacktestResult, PairBacktestError> {
+    if !(times.len() == z_scores.len()
+        && times.len() == a_prices.len()
+        && times.len() == b_prices.len()
+        && times.len() == sigmas.len())
+    {
+        return Err(PairBacktestError::Data("series length mismatch".into()));
+    }
+
+    let engine = SignalEngine::new(params.clone());
+
+    let mut wins = 0usize;
+    let mut losses = 0usize;
+    let mut gross_profit = 0.0;
+    let mut gross_loss = 0.0;
+    let mut equity = 1.0;
+    let mut position: Option<SimPosition> = None;
+    let mut trades = Vec::new();
+
+    for i in 0..times.len() {
+        let ms = times[i];
+        let z = z_scores[i];
+        let sigma = sigmas[i];
 
         if position.is_none() {
             let Some(sig) = engine.entry_signal(z) else {
@@ -300,43 +431,114 @@ pub async fn run_backtest(
                 side: sig,
                 entry_ms: ms,
                 entry_z: z,
-                a0: a_prices[i],
-                b0: b_prices[i],
                 age: 0,
                 breakeven_armed: false,
-                per_leg_notional: per_leg,
+                lots: vec![SimLot {
+                    a0: a_prices[i],
+                    b0: b_prices[i],
+                    per_leg_notional: per_leg,
+                }],
+                best_favorable_z: z,
+                trailing_armed: false,
+                trailing_stop_z: None,
+                add_on_fired: false,
             });
             continue;
         }
 
         let pos = position.as_mut().expect("position exists");
         pos.age += 1;
+        let risk_band = (params.stop_z - params.entry_z).abs();
+        let favorable_r = match pos.side {
+            PairSide::ShortSpread => (pos.entry_z - z) / risk_band,
+            PairSide::LongSpread => (z - pos.entry_z) / risk_band,
+        };
+        match pos.side {
+            PairSide::ShortSpread => {
+                if z < pos.best_favorable_z {
+                    pos.best_favorable_z = z;
+                }
+            }
+            PairSide::LongSpread => {
+                if z > pos.best_favorable_z {
+                    pos.best_favorable_z = z;
+                }
+            }
+        }
+        match experiment {
+            Some(BacktestExperiment::AddOn {
+                trigger_r,
+                add_on_fraction,
+            }) if !pos.add_on_fired && favorable_r >= trigger_r => {
+                let add_notional = pos.lots[0].per_leg_notional * add_on_fraction;
+                pos.lots.push(SimLot {
+                    a0: a_prices[i],
+                    b0: b_prices[i],
+                    per_leg_notional: add_notional,
+                });
+                pos.add_on_fired = true;
+            }
+            _ => {}
+        }
+        match experiment {
+            Some(BacktestExperiment::TrailingStop { arm_r, giveback_r }) if favorable_r >= arm_r => {
+                pos.trailing_armed = true;
+                pos.trailing_stop_z = Some(match pos.side {
+                    PairSide::ShortSpread => pos.best_favorable_z + giveback_r * risk_band,
+                    PairSide::LongSpread => pos.best_favorable_z - giveback_r * risk_band,
+                });
+            }
+            _ => {}
+        }
         if !pos.breakeven_armed && engine.should_arm_breakeven(pos.side, z) {
             pos.breakeven_armed = true;
         }
-        let pnl_fraction = unrealized_pnl_fraction(
-            pos.side,
-            dec_from_f64(pos.a0, "a0")?,
-            dec_from_f64(pos.b0, "b0")?,
-            dec_from_f64(a_prices[i], "a_now")?,
-            dec_from_f64(b_prices[i], "b_now")?,
-            params.fee_per_leg,
-        )
-        .to_string()
-        .parse::<f64>()
-        .map_err(|e| PairBacktestError::Data(format!("pnl fraction parse: {e}")))?;
-        let reason = engine.exit_reason(
+        let total_pnl = pos
+            .lots
+            .iter()
+            .map(|lot| {
+                unrealized_pnl_fraction(
+                    pos.side,
+                    dec_from_f64(lot.a0, "a0")?,
+                    dec_from_f64(lot.b0, "b0")?,
+                    dec_from_f64(a_prices[i], "a_now")?,
+                    dec_from_f64(b_prices[i], "b_now")?,
+                    params.fee_per_leg,
+                )
+                .to_string()
+                .parse::<f64>()
+                .map(|pnl_fraction| pnl_fraction * lot.per_leg_notional)
+                .map_err(|e| PairBacktestError::Data(format!("pnl fraction parse: {e}")))
+            })
+            .collect::<Result<Vec<_>, PairBacktestError>>()?
+            .into_iter()
+            .sum::<f64>();
+        let total_notional = pos.total_per_leg_notional();
+        let pnl_fraction = if total_notional > 0.0 {
+            total_pnl / total_notional
+        } else {
+            0.0
+        };
+        let base_reason = engine.exit_reason(
             pos.side,
             z,
             pos.age,
             pos.breakeven_armed,
             Some(dec_from_f64(pnl_fraction, "pnl_fraction")?),
         );
-        let Some(reason) = reason else {
-            continue;
+        let trailing_hit = matches!(experiment, Some(BacktestExperiment::TrailingStop { .. }))
+            && pos.trailing_armed
+            && pos.trailing_stop_z.is_some_and(|trail| match pos.side {
+                PairSide::ShortSpread => z >= trail,
+                PairSide::LongSpread => z <= trail,
+            });
+        let reason_label = match (base_reason, trailing_hit) {
+            (Some(reason), _) => reason.as_str().to_string(),
+            (None, true) => "trailing_stop".to_string(),
+            (None, false) => continue,
         };
 
-        let pnl = pnl_fraction * pos.per_leg_notional;
+        let pnl = total_pnl;
         equity += pnl;
         if pnl > 0.0 {
             wins += 1;
@@ -351,9 +553,9 @@ pub async fn run_backtest(
             side: pos.side.as_str().to_string(),
             entry_z: pos.entry_z,
             exit_z: z,
-            reason: reason.as_str().to_string(),
+            reason: reason_label,
             net: pnl,
-            per_leg_notional: pos.per_leg_notional,
+            per_leg_notional: pos.total_per_leg_notional(),
         });
         position = None;
     }
@@ -414,6 +616,15 @@ pub async fn split_summary(
     params: &PairParams,
     split_pct: f64,
 ) -> Result<SplitBacktestSummary, PairBacktestError> {
+    split_summary_with_experiment(db_path, params, split_pct, None).await
+}
+
+pub async fn split_summary_with_experiment(
+    db_path: &str,
+    params: &PairParams,
+    split_pct: f64,
+    experiment: Option<BacktestExperiment>,
+) -> Result<SplitBacktestSummary, PairBacktestError> {
     let (times, _, _) = load_pair_series_from_db(db_path, params).await?;
     if times.is_empty() {
         return Err(PairBacktestError::Data("no pair candles".into()));
@@ -421,15 +632,15 @@ pub async fn split_summary(
     let split_idx = ((times.len() as f64) * split_pct).floor() as usize;
     let safe_idx = split_idx.min(times.len().saturating_sub(1));
     let split_ms = times[safe_idx];
-    let train = run_backtest(db_path, params, None, Some(split_ms)).await?;
-    let hold = run_backtest(db_path, params, Some(split_ms), None).await?;
-    let full = run_backtest(db_path, params, None, None).await?;
+    let train = run_backtest_with_experiment(db_path, params, None, Some(split_ms), experiment).await?;
+    let hold = run_backtest_with_experiment(db_path, params, Some(split_ms), None, experiment).await?;
+    let full = run_backtest_with_experiment(db_path, params, None, None, experiment).await?;
 
     let mut fixed = params.clone();
     fixed.risk_pct_of_equity = Decimal::ZERO;
-    let fixed_train = run_backtest(db_path, &fixed, None, Some(split_ms)).await?;
-    let fixed_hold = run_backtest(db_path, &fixed, Some(split_ms), None).await?;
-    let fixed_full = run_backtest(db_path, &fixed, None, None).await?;
+    let fixed_train = run_backtest_with_experiment(db_path, &fixed, None, Some(split_ms), experiment).await?;
+    let fixed_hold = run_backtest_with_experiment(db_path, &fixed, Some(split_ms), None, experiment).await?;
+    let fixed_full = run_backtest_with_experiment(db_path, &fixed, None, None, experiment).await?;
 
     Ok(SplitBacktestSummary {
         pair: full.pair.clone(),

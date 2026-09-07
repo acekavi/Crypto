@@ -14,4 +14,7 @@ pub use signal::{ExitReason, PairParams, PairSide, SignalEngine, unrealized_pnl_
 pub use sizing::{CapReason, Sizing, SizingError, per_leg_notional};
 pub use spread::{RollingZ, Stats, log_spread};
 pub use state::{Reconciliation, reconcile_pair};
-pub use supervisor::{BarOutcome, BotSnapshot, PairContext, PortfolioGuard, evaluate_bar, run_pair};
+pub use supervisor::{
+    BarOutcome, BotSnapshot, PairContext, PortfolioGuard, PreparedBar, evaluate_bar,
+    evaluate_prepared_bar, prepare_bar, prepare_bar_with_state, run_pair,
+};

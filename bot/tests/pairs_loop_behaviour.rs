@@ -3,6 +3,7 @@ mod support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use botcore::{Instrument, Symbol, Timeframe};
 use pairs::{
@@ -117,14 +118,21 @@ async fn a_z_inside_the_band_opens_nothing_and_still_writes_a_heartbeat() {
 #[tokio::test]
 async fn a_repeated_bar_is_skipped_without_re_evaluating_the_signal() {
     let ex = Arc::new(FaultExchange::new());
-    let last = 1_700_000_000_000;
+    let hour_ms = Timeframe::H1.duration_ms();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("unix epoch")
+        .as_millis() as i64;
+    let last = now_ms - (now_ms % hour_ms) - hour_ms;
     ex.candles("AAVEUSDT", last, 181, |_| dec!(100));
     ex.candles("ETHUSDT", last, 181, |_| dec!(100));
-    let (ctx, _journal, _dir) = ctx_for(ex, "aave_eth", "AAVE/ETH", 100, params("AAVEUSDT", "ETHUSDT"), false).await;
+    let (ctx, _journal, _dir) = ctx_for(ex.clone(), "aave_eth", "AAVE/ETH", 100, params("AAVEUSDT", "ETHUSDT"), false).await;
 
     let _ = evaluate_bar(&ctx).await.expect("first");
+    assert_eq!(ex.kline_call_count(), 2, "first evaluation should fetch both legs once");
     let out = evaluate_bar(&ctx).await.expect("second");
     assert!(matches!(out, BarOutcome::Unchanged));
+    assert_eq!(ex.kline_call_count(), 2, "second evaluation should reuse the prior closed bar without refetching klines");
 }
 
 #[tokio::test]

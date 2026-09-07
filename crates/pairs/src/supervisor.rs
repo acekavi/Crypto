@@ -111,6 +111,18 @@ struct LatestSnapshot {
     b_close: Decimal,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedBar {
+    prev_hb: Option<PairHeartbeat>,
+    journal_position: Option<PairPositionRecord>,
+    snapshot: Option<LatestSnapshot>,
+    loop_ms: i64,
+    common: usize,
+    refreshed: bool,
+}
+
+const BAR_CLOSE_GRACE_MS: i64 = 5_000;
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -129,6 +141,25 @@ fn parse_side(s: &str) -> Option<PairSide> {
         "long_spread" => Some(PairSide::LongSpread),
         "short_spread" => Some(PairSide::ShortSpread),
         _ => None,
+    }
+}
+
+fn should_refresh_closed_bar(prev_last_bar_ms: Option<i64>, timeframe: botcore::Timeframe, now_ms: i64) -> bool {
+    let Some(prev_last_bar_ms) = prev_last_bar_ms else {
+        return true;
+    };
+    let tf_ms = timeframe.duration_ms();
+    now_ms >= prev_last_bar_ms + tf_ms + tf_ms + BAR_CLOSE_GRACE_MS
+}
+
+fn heartbeat_from_previous(bot_id: &str, prev_hb: &PairHeartbeat, loop_ms: i64) -> PairHeartbeat {
+    PairHeartbeat {
+        bot_id: bot_id.to_string(),
+        last_bar_ms: prev_hb.last_bar_ms,
+        last_loop_ms: Some(loop_ms),
+        last_z: prev_hb.last_z,
+        last_signal: prev_hb.last_signal.clone(),
+        last_guard_reason: prev_hb.last_guard_reason.clone(),
     }
 }
 
@@ -240,12 +271,61 @@ async fn quotes_for(ctx: &PairContext) -> Result<(LegQuote, LegQuote), Execution
     ))
 }
 
-pub async fn evaluate_bar(ctx: &PairContext) -> Result<BarOutcome, ExecutionError> {
-    let prev_hb = ctx.journal.pair_heartbeat(&ctx.bot_id).await.ok().flatten();
-    let prev_last_bar = prev_hb.as_ref().and_then(|h| h.last_bar_ms);
-    let journal_position = ctx.journal.pair_position(&ctx.bot_id).await?;
-    let (snapshot, common) = latest_snapshot(ctx).await?;
+pub async fn prepare_bar_with_state(
+    ctx: &PairContext,
+    prev_hb: Option<PairHeartbeat>,
+    journal_position: Option<PairPositionRecord>,
+) -> Result<PreparedBar, ExecutionError> {
     let loop_ms = now_ms();
+
+    if !should_refresh_closed_bar(prev_hb.as_ref().and_then(|h| h.last_bar_ms), ctx.params.timeframe, loop_ms) {
+        return Ok(PreparedBar {
+            prev_hb,
+            journal_position,
+            snapshot: None,
+            loop_ms,
+            common: 0,
+            refreshed: false,
+        });
+    }
+
+    let (snapshot, common) = latest_snapshot(ctx).await?;
+    Ok(PreparedBar {
+        prev_hb,
+        journal_position,
+        snapshot,
+        loop_ms,
+        common,
+        refreshed: true,
+    })
+}
+
+pub async fn prepare_bar(ctx: &PairContext) -> Result<PreparedBar, ExecutionError> {
+    let prev_hb = ctx.journal.pair_heartbeat(&ctx.bot_id).await.ok().flatten();
+    let journal_position = ctx.journal.pair_position(&ctx.bot_id).await?;
+    prepare_bar_with_state(ctx, prev_hb, journal_position).await
+}
+
+pub async fn evaluate_prepared_bar(ctx: &PairContext, prepared: PreparedBar) -> Result<BarOutcome, ExecutionError> {
+    let PreparedBar {
+        prev_hb,
+        journal_position,
+        snapshot,
+        loop_ms,
+        common,
+        refreshed,
+    } = prepared;
+
+    if !refreshed {
+        if let Some(prev_hb) = prev_hb.as_ref() {
+            ctx.journal
+                .upsert_pair_heartbeat(&heartbeat_from_previous(&ctx.bot_id, prev_hb, loop_ms))
+                .await?;
+        }
+        return Ok(BarOutcome::Unchanged);
+    }
+
+    let prev_last_bar = prev_hb.as_ref().and_then(|h| h.last_bar_ms);
 
     let Some(snapshot) = snapshot else {
         ctx.journal
@@ -426,6 +506,11 @@ pub async fn evaluate_bar(ctx: &PairContext) -> Result<BarOutcome, ExecutionErro
             Ok(BarOutcome::NoSignal)
         }
     }
+}
+
+pub async fn evaluate_bar(ctx: &PairContext) -> Result<BarOutcome, ExecutionError> {
+    let prepared = prepare_bar(ctx).await?;
+    evaluate_prepared_bar(ctx, prepared).await
 }
 
 pub async fn run_pair(ctx: PairContext) -> Result<(), ExecutionError> {
