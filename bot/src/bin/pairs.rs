@@ -188,6 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kline_margin_bars: cfg.runtime.kline_margin_bars,
             shadow,
             instruments: instrument_map.clone(),
+            risk: cfg.risk,
         });
     }
 

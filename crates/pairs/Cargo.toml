@@ -20,3 +20,4 @@ tracing.workspace = true
 async-trait = "0.1"
 rust_decimal_macros.workspace = true
 serde_json.workspace = true
+tempfile = "3"

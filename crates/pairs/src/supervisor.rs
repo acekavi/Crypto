@@ -86,6 +86,81 @@ pub struct PairContext {
     pub kline_margin_bars: u16,
     pub shadow: bool,
     pub instruments: HashMap<String, Instrument>,
+    pub risk: RiskGuardConfig,
+}
+
+/// Portfolio-wide equity circuit breaker. Account equity is shared across
+/// every bot, so these thresholds are too, even though each bot evaluates
+/// them independently against the same journal.
+///
+/// Deliberately two tiers, matching the daily/total split already used
+/// elsewhere in this project's research practice (see
+/// `docs/strategies/holdout-validation-pre-registration.md`'s "-5% daily /
+/// -15% total"): a daily halt is a brake, expected to self-clear; a total
+/// halt is a stop, requiring a human to run `pairs_clear_halt` before trading
+/// resumes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RiskGuardConfig {
+    /// Percent drawdown from the first equity reading of the current UTC day
+    /// that blocks new entries. Self-clears once equity recovers above the
+    /// threshold or a new UTC day starts — it never touches `halt_state`.
+    pub daily_loss_halt_pct: Decimal,
+    /// Percent drawdown from the highest equity ever recorded that halts the
+    /// portfolio outright, via `Journal::set_halt`. Stays halted — even
+    /// across a restart — until a human clears it.
+    pub total_loss_halt_pct: Decimal,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum EquityGuardOutcome {
+    Ok,
+    Daily(String),
+    Total(String),
+}
+
+/// Start of the UTC day containing `ms`, in epoch milliseconds.
+fn start_of_utc_day_ms(ms: i64) -> i64 {
+    const DAY_MS: i64 = 86_400_000;
+    ms.div_euclid(DAY_MS) * DAY_MS
+}
+
+/// Records the current equity, then checks it against both drawdown
+/// thresholds. Pure evaluation only — the caller decides what a `Total`
+/// verdict does to `halt_state`, so this stays testable without one.
+async fn check_equity_guard(
+    journal: &Journal,
+    risk: &RiskGuardConfig,
+    equity: Decimal,
+    now_ms: i64,
+) -> Result<EquityGuardOutcome, ExecutionError> {
+    journal.record_equity(equity, now_ms).await?;
+
+    if let Some(peak) = journal.high_water_mark().await?
+        && peak > Decimal::ZERO
+    {
+        let dd_pct = (peak - equity) / peak * Decimal::from(100);
+        if dd_pct >= risk.total_loss_halt_pct {
+            return Ok(EquityGuardOutcome::Total(format!(
+                "total drawdown {dd_pct:.2}% from peak equity {peak} (now {equity}) >= {}% halt threshold",
+                risk.total_loss_halt_pct
+            )));
+        }
+    }
+
+    let day_start_ms = start_of_utc_day_ms(now_ms);
+    if let Some(day_start_equity) = journal.day_start_equity(day_start_ms).await?
+        && day_start_equity > Decimal::ZERO
+    {
+        let dd_pct = (day_start_equity - equity) / day_start_equity * Decimal::from(100);
+        if dd_pct >= risk.daily_loss_halt_pct {
+            return Ok(EquityGuardOutcome::Daily(format!(
+                "daily drawdown {dd_pct:.2}% from day-start equity {day_start_equity} (now {equity}) >= {}% halt threshold",
+                risk.daily_loss_halt_pct
+            )));
+        }
+    }
+
+    Ok(EquityGuardOutcome::Ok)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -432,6 +507,38 @@ pub async fn evaluate_prepared_bar(ctx: &PairContext, prepared: PreparedBar) -> 
         }
     }
 
+    // Portfolio-wide equity circuit breaker. Placed after the reconcile
+    // match above, so it only ever gates a *new* entry — a bot already
+    // holding a position returned from the `Reconciliation::Holding` arm
+    // and keeps being fully managed (target/stop/time exits still fire)
+    // regardless of a halt here.
+    if let Some(reason) = ctx.journal.halt_reason().await? {
+        return Ok(BarOutcome::Halted { reason });
+    }
+    let balance = ctx.client.balance().await?;
+    match check_equity_guard(&ctx.journal, &ctx.risk, balance.equity, loop_ms).await? {
+        EquityGuardOutcome::Total(reason) => {
+            ctx.journal.set_halt(&reason, loop_ms).await?;
+            ctx.journal.record_pair_event(&PairEvent {
+                bot_id: ctx.bot_id.clone(),
+                at_ms: snapshot.latest_ms,
+                kind: PairEventKind::Halted,
+                detail: reason.clone(),
+            }).await?;
+            return Ok(BarOutcome::Halted { reason });
+        }
+        EquityGuardOutcome::Daily(reason) => {
+            ctx.journal.record_pair_event(&PairEvent {
+                bot_id: ctx.bot_id.clone(),
+                at_ms: snapshot.latest_ms,
+                kind: PairEventKind::EntrySkipped,
+                detail: reason.clone(),
+            }).await?;
+            return Ok(BarOutcome::Deferred { reason });
+        }
+        EquityGuardOutcome::Ok => {}
+    }
+
     let Some(signal) = snapshot.signal else {
         return Ok(BarOutcome::NoSignal);
     };
@@ -457,7 +564,8 @@ pub async fn evaluate_prepared_bar(ctx: &PairContext, prepared: PreparedBar) -> 
         return Ok(BarOutcome::Deferred { reason });
     }
 
-    let balance = ctx.client.balance().await?;
+    // `balance` was already fetched above for the equity guard; reused here
+    // rather than queried twice in the same bar.
     let sizing = per_leg_notional(&ctx.params, balance.equity, balance.available, snapshot.spread_sigma)
         .map_err(|e| ExecutionError::Exchange(ExchangeError::Decode(format!("sizing: {e}"))))?;
 
@@ -652,5 +760,84 @@ mod tests {
     fn an_unknown_bot_id_does_not_defer() {
         let g = guard(vec![snapshot("a", 100, &["AAVEUSDT", "ETHUSDT"])]);
         assert_eq!(g.defer_reason("nobody", PairSide::LongSpread, 100), None);
+    }
+
+    // --- equity circuit breaker ---
+
+    #[test]
+    fn start_of_day_rounds_down_to_the_utc_day_boundary() {
+        let noon_sep_5 = 1_788_620_400_000; // 2026-09-05 15:00:00 UTC
+        let midnight_sep_5 = 1_788_566_400_000; // 2026-09-05 00:00:00 UTC
+        assert_eq!(start_of_utc_day_ms(noon_sep_5), midnight_sep_5);
+        assert_eq!(start_of_utc_day_ms(midnight_sep_5), midnight_sep_5);
+    }
+
+    async fn test_journal() -> (Journal, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = Journal::open_local(dir.path().join("j.db").to_str().unwrap())
+            .await
+            .expect("journal");
+        (journal, dir)
+    }
+
+    fn risk(daily_pct: i64, total_pct: i64) -> RiskGuardConfig {
+        RiskGuardConfig {
+            daily_loss_halt_pct: Decimal::from(daily_pct),
+            total_loss_halt_pct: Decimal::from(total_pct),
+        }
+    }
+
+    #[tokio::test]
+    async fn equity_within_both_thresholds_is_ok() {
+        let (journal, _dir) = test_journal().await;
+        let day0 = 0i64;
+        journal.record_equity(Decimal::from(10_000), day0).await.unwrap();
+        let outcome = check_equity_guard(&journal, &risk(5, 15), Decimal::from(9_600), day0 + 3_600_000)
+            .await
+            .unwrap();
+        assert_eq!(outcome, EquityGuardOutcome::Ok, "4% drawdown must clear a 5%/15% guard");
+    }
+
+    #[tokio::test]
+    async fn a_daily_drawdown_past_threshold_defers_without_touching_halt_state() {
+        let (journal, _dir) = test_journal().await;
+        let day0 = 0i64;
+        journal.record_equity(Decimal::from(10_000), day0).await.unwrap();
+        let outcome = check_equity_guard(&journal, &risk(5, 15), Decimal::from(9_400), day0 + 3_600_000)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, EquityGuardOutcome::Daily(_)), "6% >= 5% daily threshold must defer");
+        assert_eq!(
+            journal.halt_reason().await.unwrap(),
+            None,
+            "a daily-only breach must never write to halt_state"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_total_drawdown_past_threshold_is_reported_as_total() {
+        let (journal, _dir) = test_journal().await;
+        journal.record_equity(Decimal::from(10_000), 0).await.unwrap();
+        journal.record_equity(Decimal::from(11_000), 3_600_000).await.unwrap(); // new peak
+        let outcome = check_equity_guard(&journal, &risk(5, 15), Decimal::from(9_300), 7_200_000)
+            .await
+            .unwrap();
+        // (11000 - 9300) / 11000 = 15.45% >= 15%
+        assert!(matches!(outcome, EquityGuardOutcome::Total(_)), "15.45% >= 15% total threshold must halt");
+    }
+
+    #[tokio::test]
+    async fn a_new_utc_day_gets_its_own_daily_baseline() {
+        let (journal, _dir) = test_journal().await;
+        let day0 = 0i64;
+        let day1 = 86_400_000i64;
+        journal.record_equity(Decimal::from(10_000), day0).await.unwrap();
+        journal.record_equity(Decimal::from(9_400), day0 + 3_600_000).await.unwrap(); // -6% day0, would defer
+        // Day 1 opens lower but flat against its own (lower) baseline.
+        journal.record_equity(Decimal::from(9_400), day1).await.unwrap();
+        let outcome = check_equity_guard(&journal, &risk(5, 15), Decimal::from(9_350), day1 + 3_600_000)
+            .await
+            .unwrap();
+        assert_eq!(outcome, EquityGuardOutcome::Ok, "day 1's baseline is day 1's own opening equity, not day 0's");
     }
 }

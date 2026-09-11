@@ -15,6 +15,6 @@ pub use sizing::{CapReason, Sizing, SizingError, per_leg_notional};
 pub use spread::{RollingZ, Stats, log_spread};
 pub use state::{Reconciliation, reconcile_pair};
 pub use supervisor::{
-    BarOutcome, BotSnapshot, PairContext, PortfolioGuard, PreparedBar, evaluate_bar,
-    evaluate_prepared_bar, prepare_bar, prepare_bar_with_state, run_pair,
+    BarOutcome, BotSnapshot, PairContext, PortfolioGuard, PreparedBar, RiskGuardConfig,
+    evaluate_bar, evaluate_prepared_bar, prepare_bar, prepare_bar_with_state, run_pair,
 };

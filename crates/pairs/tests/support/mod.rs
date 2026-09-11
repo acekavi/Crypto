@@ -51,6 +51,7 @@ pub struct FaultExchange {
     positions: Mutex<HashMap<String, Decimal>>,
     candles: Mutex<HashMap<String, Vec<Candle>>>,
     kline_calls: Mutex<usize>,
+    balance: Mutex<Option<Decimal>>,
 }
 
 #[allow(dead_code)]
@@ -77,6 +78,12 @@ impl FaultExchange {
             .lock()
             .unwrap()
             .insert(symbol.into(), signed_size);
+        self
+    }
+
+    /// Overrides the fixed `equity: 10000` default `balance()` returns.
+    pub fn equity(&self, equity: Decimal) -> &Self {
+        *self.balance.lock().unwrap() = Some(equity);
         self
     }
 
@@ -385,9 +392,7 @@ impl ExchangeClient for FaultExchange {
         Ok(())
     }
     async fn balance(&self) -> Result<Balance, ExchangeError> {
-        Ok(Balance {
-            equity: dec!(10000),
-            available: dec!(10000),
-        })
+        let equity = self.balance.lock().unwrap().unwrap_or(dec!(10000));
+        Ok(Balance { equity, available: equity })
     }
 }

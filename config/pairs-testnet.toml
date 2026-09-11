@@ -18,6 +18,19 @@ unwind_ladder = [10, 25, 60]
 # Revert by setting this back to true (or deleting the line).
 unwind_on_partial_fill = false
 
+# Portfolio-wide equity circuit breaker (2026-09-12). Daily is a brake:
+# blocks new entries once account equity has drawn down this much from its
+# first reading of the current UTC day, and self-clears on recovery or at
+# the next UTC day. Total is a stop: blocks new entries once equity has
+# drawn down this much from its all-time peak, persists across restarts,
+# and stays in force until a human runs `pairs_clear_halt testnet --clear`.
+# Neither ever blocks managing a position already open — only new entries.
+# Thresholds match this project's existing "-5% daily / -15% total"
+# convention from docs/strategies/holdout-validation-pre-registration.md.
+[risk]
+daily_loss_halt_pct = 5.0
+total_loss_halt_pct = 15.0
+
 [[bot]]
 id = "aave_eth"
 name = "AAVE/ETH"

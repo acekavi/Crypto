@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use crate::config::Profile;
 use botcore::{Symbol, Timeframe};
-use pairs::{ExecutorConfig, PairParams};
+use pairs::{ExecutorConfig, PairParams, RiskGuardConfig};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use tracing::warn;
@@ -36,6 +36,7 @@ impl BotConfig {
 pub struct PairsConfig {
     pub runtime: RuntimeSettings,
     pub executor: ExecutorConfig,
+    pub risk: RiskGuardConfig,
     pub bots: Vec<BotConfig>,
 }
 
@@ -53,8 +54,40 @@ pub enum PairsConfigError {
 struct RawConfig {
     runtime: RawRuntime,
     executor: RawExecutor,
+    /// Optional so existing config files without a `[risk]` section keep
+    /// loading, with the circuit breaker effectively disabled (thresholds
+    /// high enough that ordinary drawdown never reaches them).
+    #[serde(default)]
+    risk: RawRisk,
     #[serde(rename = "bot")]
     bots: Vec<RawBot>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRisk {
+    #[serde(default = "default_daily_loss_halt_pct")]
+    daily_loss_halt_pct: f64,
+    #[serde(default = "default_total_loss_halt_pct")]
+    total_loss_halt_pct: f64,
+}
+
+impl Default for RawRisk {
+    fn default() -> Self {
+        RawRisk {
+            daily_loss_halt_pct: default_daily_loss_halt_pct(),
+            total_loss_halt_pct: default_total_loss_halt_pct(),
+        }
+    }
+}
+
+// 100% is not reachable by a drawdown percentage, so an omitted `[risk]`
+// section is a no-op circuit breaker rather than a silent behavior change
+// for any config file written before this existed.
+fn default_daily_loss_halt_pct() -> f64 {
+    100.0
+}
+fn default_total_loss_halt_pct() -> f64 {
+    100.0
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +154,17 @@ pub fn parse_pairs_config(src: &str) -> Result<PairsConfig, PairsConfigError> {
         if pair[1] <= pair[0] {
             return Err(PairsConfigError::Invalid("unwind_ladder must be strictly increasing".into()));
         }
+    }
+    if !(raw.risk.daily_loss_halt_pct > 0.0 && raw.risk.daily_loss_halt_pct <= 100.0) {
+        return Err(PairsConfigError::Invalid("daily_loss_halt_pct must be in (0, 100]".into()));
+    }
+    if !(raw.risk.total_loss_halt_pct > 0.0 && raw.risk.total_loss_halt_pct <= 100.0) {
+        return Err(PairsConfigError::Invalid("total_loss_halt_pct must be in (0, 100]".into()));
+    }
+    if raw.risk.total_loss_halt_pct < raw.risk.daily_loss_halt_pct {
+        return Err(PairsConfigError::Invalid(
+            "total_loss_halt_pct must be >= daily_loss_halt_pct, or the total halt could never fire before the daily one already had".into(),
+        ));
     }
 
     let mut ids = HashSet::new();
@@ -221,6 +265,10 @@ pub fn parse_pairs_config(src: &str) -> Result<PairsConfig, PairsConfigError> {
             poll_interval: std::time::Duration::from_secs(raw.executor.poll_interval_secs),
             unwind_ladder: raw.executor.unwind_ladder.into_iter().map(Decimal::from).collect(),
             unwind_on_partial_fill: raw.executor.unwind_on_partial_fill,
+        },
+        risk: RiskGuardConfig {
+            daily_loss_halt_pct: dec_from_f64(raw.risk.daily_loss_halt_pct, "daily_loss_halt_pct")?,
+            total_loss_halt_pct: dec_from_f64(raw.risk.total_loss_halt_pct, "total_loss_halt_pct")?,
         },
         bots,
     })
