@@ -70,6 +70,14 @@ struct RawExecutor {
     fill_timeout_secs: u64,
     poll_interval_secs: u64,
     unwind_ladder: Vec<u64>,
+    /// Optional so existing config files without this key keep loading and
+    /// keep today's behavior. See `ExecutorConfig::unwind_on_partial_fill`.
+    #[serde(default = "default_unwind_on_partial_fill")]
+    unwind_on_partial_fill: bool,
+}
+
+fn default_unwind_on_partial_fill() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,6 +220,7 @@ pub fn parse_pairs_config(src: &str) -> Result<PairsConfig, PairsConfigError> {
             fill_timeout: std::time::Duration::from_secs(raw.executor.fill_timeout_secs),
             poll_interval: std::time::Duration::from_secs(raw.executor.poll_interval_secs),
             unwind_ladder: raw.executor.unwind_ladder.into_iter().map(Decimal::from).collect(),
+            unwind_on_partial_fill: raw.executor.unwind_on_partial_fill,
         },
         bots,
     })

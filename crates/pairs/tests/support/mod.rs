@@ -27,7 +27,15 @@ const MAX_LINK_ID_LEN: usize = 36;
 #[derive(Debug, Clone)]
 pub enum LegAction {
     Fills { price: Decimal },
+    /// Fills part of the requested qty, then the order reaches a terminal
+    /// `Cancelled` state — models a fill-timeout cancel already having
+    /// happened, either by the exchange or by the executor's own timeout path.
     PartiallyFills { qty: Decimal, price: Decimal },
+    /// Fills part of the requested qty and stays non-terminal
+    /// (`PartiallyFilled`) — an order still genuinely resting/working on the
+    /// book, as `unwind_on_partial_fill = false` leaves it. Distinct from
+    /// `PartiallyFills`, which is already cancelled.
+    RestsPartiallyFilled { qty: Decimal, price: Decimal },
     Rejected,
     Rests,
     TimesOutButFills { price: Decimal },
@@ -208,6 +216,13 @@ impl ExchangeClient for FaultExchange {
             }
             LegAction::PartiallyFills { qty, price } => (
                 Some(record(OrderState::Cancelled, clamp(qty), price)),
+                Ok(OrderAck {
+                    order_id: format!("oid-{}", req.order_link_id),
+                    order_link_id: req.order_link_id.clone(),
+                }),
+            ),
+            LegAction::RestsPartiallyFilled { qty, price } => (
+                Some(record(OrderState::PartiallyFilled, clamp(qty), price)),
                 Ok(OrderAck {
                     order_id: format!("oid-{}", req.order_link_id),
                     order_link_id: req.order_link_id.clone(),

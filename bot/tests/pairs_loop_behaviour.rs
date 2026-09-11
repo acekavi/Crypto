@@ -77,6 +77,7 @@ async fn ctx_for(
                 fill_timeout: std::time::Duration::ZERO,
                 poll_interval: std::time::Duration::ZERO,
                 unwind_ladder: vec![dec!(10), dec!(25), dec!(60)],
+                unwind_on_partial_fill: true,
             },
             loop_period: std::time::Duration::from_secs(60),
             kline_margin_bars: 25,

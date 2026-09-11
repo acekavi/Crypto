@@ -33,6 +33,28 @@ pub struct ExecutorConfig {
     /// Ticks-through for each successive unwind attempt. Its length is the
     /// attempt limit; an empty ladder disables unwinding and is a config error.
     pub unwind_ladder: Vec<Decimal>,
+    /// Whether a two-leg entry that only partially fills gets flattened.
+    ///
+    /// `true` (the default, and the only behavior this module had before this
+    /// field existed) is the safety property documented on [`settle`]: any
+    /// fill short of both legs full gets unwound back to flat, because a
+    /// lopsided pair runs directional risk a market-neutral strategy has no
+    /// edge in.
+    ///
+    /// `false` disables that *only* for the case both legs actually observed
+    /// — both sides partially filled, neither cancelled. The still-unfilled
+    /// remainder on each leg is left resting (limit-only, GTC, already
+    /// placed) rather than cancelled, and the position is opened at whatever
+    /// is filled now; a later bar may see either leg's resting remainder fill
+    /// further, but nothing here tops the journalled qty/avg-price up when it
+    /// does — the exit path re-reads the true live position size when it
+    /// closes regardless, so the position is still fully closed even if the
+    /// journal is stale, but a stale qty in the meantime is a known
+    /// imprecision, not a bug. A true one-sided fill (the other leg touched
+    /// nothing at all) is a strictly worse case this flag does not affect:
+    /// that is still unwound unconditionally, because riding a fully naked
+    /// leg is a different and larger risk than riding an unequal pair.
+    pub unwind_on_partial_fill: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -241,10 +263,23 @@ pub async fn open_pair(
 
     // The placement result is never trusted. A call that returned `Err` may
     // still have reached the exchange, so the exchange is asked what exists.
-    let (a_resolved, b_resolved) = tokio::join!(
-        resolve_leg(client, cfg, Leg::A, &a_leg),
-        resolve_leg(client, cfg, Leg::B, &b_leg)
-    );
+    //
+    // When `unwind_on_partial_fill` is off, neither leg is cancelled here —
+    // `resolve_leg_no_cancel` only polls. Whether either remainder actually
+    // gets cancelled is decided after `settle` below, once both legs' joint
+    // outcome is known (a lone exposed leg must still be unwound; two
+    // partially-filled legs are what gets ridden).
+    let (a_resolved, b_resolved) = if cfg.unwind_on_partial_fill {
+        tokio::join!(
+            resolve_leg(client, cfg, Leg::A, &a_leg),
+            resolve_leg(client, cfg, Leg::B, &b_leg)
+        )
+    } else {
+        tokio::join!(
+            resolve_leg_no_cancel(client, cfg, Leg::A, &a_leg),
+            resolve_leg_no_cancel(client, cfg, Leg::B, &b_leg)
+        )
+    };
 
     // `join!` ran both resolutions to completion, so when one leg errors the
     // *other* leg's report is already in hand. Propagating the error without
@@ -303,10 +338,41 @@ pub async fn open_pair(
             }))
         }
         Settlement::Flat => {
+            if !cfg.unwind_on_partial_fill {
+                // Nothing filled on either side; no cancel happened in
+                // resolve_leg_no_cancel. Nothing to ride either, so clean up
+                // exactly as the default path would have.
+                cancel_leg_best_effort(client, &a_leg.symbol, &a_leg.order_link_id).await;
+                cancel_leg_best_effort(client, &b_leg.symbol, &b_leg.order_link_id).await;
+            }
             info!(pair = %params.display_pair(), "pair entry did not fill; account is flat");
             Ok(None)
         }
+        Settlement::Unwind(legs) if !cfg.unwind_on_partial_fill && legs.len() == 2 => {
+            // Both legs carry real exposure. Ride it: their remainder orders
+            // are already resting (resolve_leg_no_cancel never cancelled
+            // them), so leave them working and open the position at whatever
+            // is filled right now.
+            let a = legs.iter().find(|l| l.leg == Leg::A).cloned().expect("leg a present");
+            let b = legs.iter().find(|l| l.leg == Leg::B).cloned().expect("leg b present");
+            warn!(
+                pair = %params.display_pair(),
+                a_filled = %a.executed_qty, a_requested = %a.requested_qty,
+                b_filled = %b.executed_qty, b_requested = %b.requested_qty,
+                "pair entry partially filled on both legs; unwind_on_partial_fill is off — \
+                 riding the partial size, remainder orders left resting on the book"
+            );
+            Ok(Some(OpenedPair { side, a, b, opened_at_ms: bar_ms }))
+        }
         Settlement::Unwind(legs) => {
+            // Either the feature is on, or exactly one leg carries exposure
+            // (a true naked fill) — a strictly worse case the flag above does
+            // not cover. Preserve the original safety behavior: make sure
+            // nothing is still resting, then flatten whatever filled.
+            if !cfg.unwind_on_partial_fill {
+                cancel_leg_best_effort(client, &a_leg.symbol, &a_leg.order_link_id).await;
+                cancel_leg_best_effort(client, &b_leg.symbol, &b_leg.order_link_id).await;
+            }
             warn!(
                 pair = %params.display_pair(),
                 legs = legs.len(),
@@ -407,6 +473,31 @@ async fn resolve_leg(
     };
 
     Ok(build_report(leg, order, status.as_ref()))
+}
+
+/// Like [`resolve_leg`], but never cancels — used when `unwind_on_partial_fill`
+/// is off, so the caller can decide to cancel (or not) only once both legs'
+/// joint outcome is known. Whatever the poll last saw, terminal or not, is
+/// reported as-is; the order itself is untouched either way.
+async fn resolve_leg_no_cancel(
+    client: &dyn ExchangeClient,
+    cfg: &ExecutorConfig,
+    leg: Leg,
+    order: &LimitLeg,
+) -> Result<LegReport, ExecutionError> {
+    let status = poll_to_terminal(client, cfg, &order.symbol, &order.order_link_id).await?;
+    Ok(build_report(leg, order, status.as_ref()))
+}
+
+/// Cancel an order, logging rather than failing on error.
+///
+/// Mirrors the ignored-error cancel already used in [`resolve_leg`]'s `None`
+/// branch: a cancel against an id the exchange settled or never saw is
+/// *expected* to fail, and that failure is confirmation, not a problem.
+async fn cancel_leg_best_effort(client: &dyn ExchangeClient, symbol: &Symbol, link_id: &str) {
+    if let Err(e) = client.cancel_order(symbol, link_id).await {
+        debug!(%symbol, link_id, error = %e, "best-effort cancel");
+    }
 }
 
 fn build_report(leg: Leg, order: &LimitLeg, status: Option<&OrderStatus>) -> LegReport {

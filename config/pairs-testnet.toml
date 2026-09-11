@@ -8,6 +8,15 @@ ticks_through = 5
 fill_timeout_secs = 20
 poll_interval_secs = 1
 unwind_ladder = [10, 25, 60]
+# Temporarily disabled (2026-09-11): a two-leg entry that partially fills on
+# both legs is no longer flattened. The unfilled remainder on each leg is
+# left resting instead of cancelled, and the position rides at whatever is
+# filled now until it hits target_z/stop_z/max_hold_bars, same as any other
+# position. A true one-sided fill (only one leg ever touched) is unaffected
+# and still unwinds — see ExecutorConfig::unwind_on_partial_fill in
+# crates/pairs/src/executor.rs for the exact behavior and its limits.
+# Revert by setting this back to true (or deleting the line).
+unwind_on_partial_fill = false
 
 [[bot]]
 id = "aave_eth"

@@ -52,6 +52,16 @@ fn cfg() -> ExecutorConfig {
         fill_timeout: std::time::Duration::ZERO,
         poll_interval: std::time::Duration::ZERO,
         unwind_ladder: vec![dec!(10), dec!(25), dec!(60)],
+        unwind_on_partial_fill: true,
+    }
+}
+
+/// Same as [`cfg`], but with the naked-leg protection's partial-fill unwind
+/// disabled — a both-legs-partially-filled entry rides instead of flattening.
+fn cfg_ride_partial() -> ExecutorConfig {
+    ExecutorConfig {
+        unwind_on_partial_fill: false,
+        ..cfg()
     }
 }
 
@@ -183,6 +193,74 @@ async fn a_lopsided_fill_unwinds_both_legs() {
 }
 
 #[tokio::test]
+async fn with_riding_enabled_a_both_legs_partial_fill_opens_at_the_partial_size_and_leaves_orders_resting() {
+    // The real-world case investigated this session: both legs fill some but
+    // not all of the requested qty, and stay resting (PartiallyFilled, not
+    // yet cancelled) rather than reaching a terminal state.
+    let ex = FaultExchange::new();
+    ex.script(
+        "AAVEUSDT",
+        vec![LegAction::RestsPartiallyFilled { qty: dec!(0.3), price: dec!(100.10) }],
+    );
+    ex.script(
+        "ETHUSDT",
+        vec![LegAction::RestsPartiallyFilled { qty: dec!(0.45), price: dec!(99.90) }],
+    );
+
+    let opened = open_pair(
+        &ex,
+        &cfg_ride_partial(),
+        &params(),
+        (&quote("AAVEUSDT"), &quote("ETHUSDT")),
+        PairSide::LongSpread,
+        dec!(1000),
+        1_700_000_000_000,
+    )
+    .await
+    .expect("no execution error")
+    .expect("the partial fill is ridden as the position");
+
+    assert_eq!(opened.a.executed_qty, dec!(0.3));
+    assert_eq!(opened.b.executed_qty, dec!(0.45));
+    assert!(
+        ex.cancelled.lock().unwrap().is_empty(),
+        "neither remainder order may be cancelled: {:?}",
+        ex.cancelled.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn with_riding_enabled_a_true_one_sided_fill_still_unwinds() {
+    // Riding only ever applies when BOTH legs carry exposure. A leg that
+    // filled nothing at all is the strictly worse case the flag does not
+    // cover, and must still be flattened.
+    let ex = FaultExchange::new();
+    ex.script(
+        "AAVEUSDT",
+        vec![
+            LegAction::Fills { price: dec!(100.10) },
+            LegAction::Fills { price: dec!(99.80) }, // the unwind order
+        ],
+    );
+    ex.script("ETHUSDT", vec![LegAction::Rejected]);
+
+    let got = open_pair(
+        &ex,
+        &cfg_ride_partial(),
+        &params(),
+        (&quote("AAVEUSDT"), &quote("ETHUSDT")),
+        PairSide::LongSpread,
+        dec!(1000),
+        1_700_000_000_000,
+    )
+    .await
+    .expect("the unwind succeeded");
+
+    assert!(got.is_none(), "a one-sided fill must not be reported as opened");
+    assert_eq!(ex.net_exposure("AAVEUSDT"), dec!(0), "the naked leg must still be flattened");
+}
+
+#[tokio::test]
 async fn neither_leg_filling_leaves_the_account_flat_with_no_unwind() {
     let ex = FaultExchange::new();
     ex.script("AAVEUSDT", vec![LegAction::Rejected]);
@@ -191,6 +269,31 @@ async fn neither_leg_filling_leaves_the_account_flat_with_no_unwind() {
     let got = open_pair(
         &ex,
         &cfg(),
+        &params(),
+        (&quote("AAVEUSDT"), &quote("ETHUSDT")),
+        PairSide::ShortSpread,
+        dec!(1000),
+        1_700_000_000_000,
+    )
+    .await
+    .expect("nothing to unwind is not an error");
+
+    assert!(got.is_none());
+    assert!(
+        ex.placed.lock().unwrap().iter().all(|o| !o.reduce_only),
+        "no unwind order should have been placed"
+    );
+}
+
+#[tokio::test]
+async fn with_riding_enabled_neither_leg_filling_still_leaves_the_account_flat() {
+    let ex = FaultExchange::new();
+    ex.script("AAVEUSDT", vec![LegAction::Rejected]);
+    ex.script("ETHUSDT", vec![LegAction::Rejected]);
+
+    let got = open_pair(
+        &ex,
+        &cfg_ride_partial(),
         &params(),
         (&quote("AAVEUSDT"), &quote("ETHUSDT")),
         PairSide::ShortSpread,
